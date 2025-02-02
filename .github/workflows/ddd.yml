@@ -1,9 +1,10 @@
 name: CI/CD Pipeline
 
 on:
-  # 每日 UTC 时间早上6点触发（北京时间下午2点）
+  # 每周六和周日 UTC 时间早上6点触发（北京时间下午2点）
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * 6'  # 周六
+    - cron: '0 6 * * 0'  # 周日
   # 保留原有的 push 和 pull_request 触发器
   push:
     branches: [ "master", "main" ]
@@ -69,4 +70,3 @@ jobs:
 
     - name: Run shell script
       run: ./end.sh
-
