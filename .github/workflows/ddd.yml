@@ -11,9 +11,6 @@ on:
   pull_request:
     branches: [ "master", "main" ]
 
-env:
-  DOCKER_IMAGE_NAME: chatgpt-on-wechat
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
   lint-and-test:
