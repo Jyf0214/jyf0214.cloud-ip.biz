@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10"]
+        python-version: "3.8"
 
     steps:
     - name: Checkout code
@@ -26,19 +26,38 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
+     - name: Cache pip dependencies
+       uses: actions/cache@v3
+       with:
+         path: ~/.cache/pip
+         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+         restore-keys: |
+           ${{ runner.os }}-pip-
+
+     - name: Clone private repository
+       env:
+       PAT: ${{ secrets.PAT }}
+       run: |
+         npm install pm2 -g
+         git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+
     - name: Install dependencies
       run: |
+        cd chatgpt-on-wechat
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install -r requirements-optional.txt
-        pip install black flake8 pytest
+       
 
     - name: Lint with Black
-      run: python app.py
+      run: |
+        pm2 start "python3 app.py" --name "my-python-app"
+
 
 
     - name: Test with .sh
-      run: chmod +x end.sh
+      run: |
+        chmod +x end.sh
 
     - name: Run with .sh
       run: ./end.sh
