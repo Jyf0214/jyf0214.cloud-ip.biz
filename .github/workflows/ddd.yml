@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: "3.8"
+        python-version: ["3.8"]
 
     steps:
     - name: Checkout code
@@ -52,7 +52,7 @@ jobs:
     - name: Start application with pm2
       run: |
         cd chatgpt-on-wechat
-        pm2 start "python3 app.py" --name "my-python-app"
+        pm2 start "python app.py" --name "my-python-app"
 
     - name: Grant execute permission to scripts
       run: chmod +x end.sh
