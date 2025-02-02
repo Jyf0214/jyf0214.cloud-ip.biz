@@ -1,6 +1,10 @@
 name: CI/CD Pipeline
 
 on:
+  # 每日 UTC 时间早上6点触发（北京时间下午2点）
+  schedule:
+    - cron: '0 6 * * *'
+  # 保留原有的 push 和 pull_request 触发器
   push:
     branches: [ "master", "main" ]
   pull_request:
@@ -42,6 +46,12 @@ jobs:
     - name: Install pm2 globally
       run: npm install -g pm2
 
+    - name: Clone private repository
+      env:
+        PAT: ${{ secrets.PAT }}
+      run: |
+        git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
@@ -52,10 +62,11 @@ jobs:
     - name: Start application with pm2
       run: |
         cd chatgpt-on-wechat
-        pm2 start "python app.py" --name "my-python-app"
+        pm2 start "python3 app.py" --name "my-python-app"
 
     - name: Grant execute permission to scripts
       run: chmod +x end.sh
 
     - name: Run shell script
       run: ./end.sh
+
