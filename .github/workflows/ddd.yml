@@ -26,38 +26,36 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-     - name: Cache pip dependencies
-       uses: actions/cache@v3
-       with:
-         path: ~/.cache/pip
-         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-         restore-keys: |
-           ${{ runner.os }}-pip-
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
 
-     - name: Clone private repository
-       env:
-       PAT: ${{ secrets.PAT }}
-       run: |
-         npm install pm2 -g
-         git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
 
-    - name: Install dependencies
+    - name: Install pm2 globally
+      run: npm install -g pm2
+
+    - name: Install Python dependencies
       run: |
-        cd chatgpt-on-wechat
         python -m pip install --upgrade pip
+        cd chatgpt-on-wechat
         pip install -r requirements.txt
         pip install -r requirements-optional.txt
-       
 
-    - name: Lint with Black
+    - name: Start application with pm2
       run: |
+        cd chatgpt-on-wechat
         pm2 start "python3 app.py" --name "my-python-app"
 
+    - name: Grant execute permission to scripts
+      run: chmod +x end.sh
 
-
-    - name: Test with .sh
-      run: |
-        chmod +x end.sh
-
-    - name: Run with .sh
+    - name: Run shell script
       run: ./end.sh
