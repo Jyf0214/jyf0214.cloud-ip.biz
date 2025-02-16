@@ -61,7 +61,7 @@ jobs:
           git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin
           pnpm install --filter=neko-status-plugin  --no-frozen-lockfile
           git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin
-          pnpm install --filter=nsfwjs-plugin
+          pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile
           git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin
           pnpm install --filter=siliconflow-plugin
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin
