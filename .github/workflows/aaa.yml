@@ -1,0 +1,64 @@
+name: Setup and Run Yunzai Bot
+
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 获取代码
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # 2. 安装 Node.js
+      - name: Install Node.js
+        run: |
+          sudo apt update
+          sudo apt install -y apt-transport-https curl ca-certificates software-properties-common
+          curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          node -v
+
+      # 3. 安装 Redis
+      - name: Install Redis
+        run: |
+          sudo apt install -y redis-server
+          sudo systemctl status redis-server
+
+      # 4. 安装 Git
+      - name: Install Git
+        run: |
+          sudo apt-get install -y git
+          git --version
+
+      # 5. 安装 pm2
+      - name: Install pm2
+        run: |
+          sudo npm install -g pm2
+
+      # 6. 拉取并进入项目目录
+      - name: Clone Yunzai-Bot repository
+        run: |
+          git clone https://github.com/Jyf0214/Yunzai-Bot.git
+          cd Yunzai-Bot/
+
+      # 7. 安装依赖
+      - name: Install dependencies
+        run: |
+          npm install pnpm -g
+          pnpm install -P
+
+      # 8. 启动 Yunzai Bot
+      - name: Start Yunzai Bot with pm2
+        run: |
+          pm2 start app.js --name yunzai-bot
+
+      # 9. 监听 5小时45分钟
+      - name: Sleep for 5 hours and 45 minutes
+        run: |
+          sleep 20700 # 5小时45分钟 = 20700秒
+
+      # 10. 完成后可执行的下一步
+      - name: Continue to next step
+        run: |
+          echo "监听结束，执行下一步"
+          # 下一步代码待添加
