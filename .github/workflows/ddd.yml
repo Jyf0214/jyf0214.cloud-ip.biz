@@ -1,11 +1,10 @@
-name: CI/CD Pipeline
+name: Setup and Run Yunzai Bot
 
 on:
-  # 每周六和周日 UTC 时间早上6点触发（北京时间下午2点）
   schedule:
     - cron: '0 6 * * 6'  # 周六
     - cron: '0 6 * * 0'  # 周日
-  # 保留原有的 push 和 pull_request 触发器
+    - cron: '0 6 * * 5'  # 周五
   push:
     branches: [ "master", "main" ]
   pull_request:
@@ -16,6 +15,76 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install Node.js
+        run: |
+          sudo apt update
+          sudo apt install -y apt-transport-https curl ca-certificates software-properties-common
+          curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          node -v
+
+      - name: Install Redis
+        run: |
+          sudo apt install -y redis-server
+          sudo systemctl status redis-server
+
+      - name: Install Git
+        run: |
+          sudo apt-get install -y git
+          git --version
+
+      - name: Install pm2
+        run: |
+          sudo npm install -g pm2
+
+      - name: Clone Yunzai-Bot repository
+        env:
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+        run: |
+          git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git
+          cd yunzai/
+          npm install -g pnpm
+          git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin
+          pnpm install --filter=neko-status-plugin --no-frozen-lockfile
+          git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin
+          pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile
+          git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin
+          pnpm install --filter=siliconflow-plugin --no-frozen-lockfile
+          git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin
+          sudo apt-get install -y fonts-wqy-zenhei
+          sudo apt-get install -y fontconfig
+          fc-cache -fv
+
+      - name: Install dependencies
+        run: |
+          cd yunzai/
+          pnpm install -P
+
+      - name: Start Yunzai Bot with pm2
+        run: |
+          cd yunzai/
+          pm2 start app.js --name yunzai-bot
+
+      - name: Sleep for 5 hours and 45 minutes
+        run: |
+          sleep 20700
+
+      - name: Continue to next step
+        run: |
+          echo "监听结束，执行下一步"
+          cd yunzai/
+          git config --global user.name "Jyf0214"
+          git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
+          git add .
+          git commit -m "Initial commit"
+          git push
+
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
@@ -23,51 +92,50 @@ jobs:
         python-version: ["3.8"]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install pm2 globally
-      run: npm install -g pm2
+      - name: Install pm2 globally
+        run: npm install -g pm2
 
-    - name: Clone private repository
-      env:
-        PAT: ${{ secrets.PAT }}
-      run: |
-        git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+      - name: Clone private repository
+        env:
+          PAT: ${{ secrets.PAT }}
+        run: |
+          git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        cd chatgpt-on-wechat
-        pip install -r requirements.txt
-        pip install -r requirements-optional.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          cd chatgpt-on-wechat
+          pip install -r requirements.txt
+          pip install -r requirements-optional.txt
 
-    - name: Start application with pm2
-      run: |
-        cd chatgpt-on-wechat
-        pm2 start "python3 app.py" --name "my-python-app"
+      - name: Start application with pm2
+        run: |
+          cd chatgpt-on-wechat
+          pm2 start "python3 app.py" --name "my-python-app"
 
-    - name: Grant execute permission to scripts
-      run: chmod +x end.sh
+      - name: Grant execute permission to scripts
+        run: chmod +x end.sh
 
-    - name: Run shell script
-      run: ./end.sh
-
+      - name: Run shell script
+        run: ./end.sh
