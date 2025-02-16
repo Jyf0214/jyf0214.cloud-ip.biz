@@ -73,7 +73,7 @@ jobs:
 
       - name: Sleep for 5 hours and 45 minutes
         run: |
-          sleep 200
+          sleep 21000
 
       - name: Continue to next step
         run: |
