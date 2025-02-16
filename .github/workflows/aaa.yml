@@ -53,9 +53,17 @@ jobs:
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git
           cd yunzai/
+          git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin
+          pnpm install --filter=neko-status-plugin
+          git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin
+          pnpm install --filter=nsfwjs-plugin
+          git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin
+          pnpm install --filter=siliconflow-plugin
+          git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin
           sudo apt-get install -y fonts-wqy-zenhei
           sudo apt-get install -y fontconfig
           fc-cache -fv
+
       # 7. 安装依赖
       - name: Install dependencies
         run: |
@@ -79,6 +87,7 @@ jobs:
         run: |
           echo "监听结束，执行下一步"
           # 设置全局用户名
+          cd yunzai/
           git config --global user.name "Jyf0214"
           git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
           git add .
