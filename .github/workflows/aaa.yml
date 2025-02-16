@@ -1,6 +1,16 @@
 name: Setup and Run Yunzai Bot
 
-
+on:
+  # 每周六和周日 UTC 时间早上6点触发（北京时间下午2点）
+  schedule:
+    - cron: '0 6 * * 6'  # 周六
+    - cron: '0 6 * * 0'  # 周日
+    - cron: '0 6 * * 5'  
+  # 保留原有的 push 和 pull_request 触发器
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
 jobs:
   setup:
     runs-on: ubuntu-latest
