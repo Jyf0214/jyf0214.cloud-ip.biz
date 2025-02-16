@@ -12,6 +12,10 @@ on:
   pull_request:
     branches: [ "master", "main" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -53,6 +57,7 @@ jobs:
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git
           cd yunzai/
+          npm install -g pnpm
           git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin
           pnpm install --filter=neko-status-plugin
           git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin
@@ -68,7 +73,6 @@ jobs:
       - name: Install dependencies
         run: |
           cd yunzai/
-          npm install -g pnpm
           pnpm install -P
 
       # 8. 启动 Yunzai Bot
