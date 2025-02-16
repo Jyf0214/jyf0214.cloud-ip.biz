@@ -47,8 +47,9 @@ jobs:
 
       # 6. 拉取并进入项目目录
       - name: Clone Yunzai-Bot repository
+        PAT: ${{ secrets.YunzaiBot_PAT }}
         run: |
-          git clone https://github.com/Jyf0214/Yunzai-Bot.git
+          git clone https://x-access-token:${PAT}/Jyf0214/Yunzai-Bot.git
           cd Yunzai-Bot/
 
       # 7. 安装依赖
