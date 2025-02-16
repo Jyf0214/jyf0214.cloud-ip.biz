@@ -49,7 +49,7 @@ jobs:
       # 6. 拉取并进入项目目录
       - name: Clone Yunzai-Bot repository
         env:
-          PAT: ${{ secrets.YunzaiBot_PAT }}
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git
           cd yunzai/
