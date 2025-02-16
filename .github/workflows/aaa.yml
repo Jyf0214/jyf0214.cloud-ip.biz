@@ -78,4 +78,10 @@ jobs:
       - name: Continue to next step
         run: |
           echo "监听结束，执行下一步"
-          # 下一步代码待添加
+          # 设置全局用户名
+          git config --global user.name "Jyf0214"
+          git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
+          git add .
+          git commit -m "Initial commit"
+          git push
+
