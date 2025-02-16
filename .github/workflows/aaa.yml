@@ -5,12 +5,13 @@ on:
   schedule:
     - cron: '0 6 * * 6'  # 周六
     - cron: '0 6 * * 0'  # 周日
-    - cron: '0 6 * * 5'  
+    - cron: '0 6 * * 5'  # 周五
   # 保留原有的 push 和 pull_request 触发器
   push:
     branches: [ "master", "main" ]
   pull_request:
     branches: [ "master", "main" ]
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -47,15 +48,16 @@ jobs:
 
       # 6. 拉取并进入项目目录
       - name: Clone Yunzai-Bot repository
-        PAT: ${{ secrets.YunzaiBot_PAT }}
+        env:
+          PAT: ${{ secrets.YunzaiBot_PAT }}
         run: |
-          git clone https://x-access-token:${PAT}/Jyf0214/Yunzai-Bot.git
+          git clone https://x-access-token:${PAT}@github.com/Jyf0214/Yunzai-Bot.git
           cd Yunzai-Bot/
 
       # 7. 安装依赖
       - name: Install dependencies
         run: |
-          npm install pnpm -g
+          npm install -g pnpm
           pnpm install -P
 
       # 8. 启动 Yunzai Bot
