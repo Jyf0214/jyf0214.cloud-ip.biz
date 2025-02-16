@@ -57,12 +57,14 @@ jobs:
       # 7. 安装依赖
       - name: Install dependencies
         run: |
+          cd yunzai/
           npm install -g pnpm
           pnpm install -P
 
       # 8. 启动 Yunzai Bot
       - name: Start Yunzai Bot with pm2
         run: |
+          cd yunzai/
           pm2 start app.js --name yunzai-bot
 
       # 9. 监听 5小时45分钟
