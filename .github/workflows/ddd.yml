@@ -68,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd yunzai/
-          pnpm install -P
+          pnpm install -P  --no-frozen-lockfile
 
       - name: Start Yunzai Bot with pm2
         run: |
