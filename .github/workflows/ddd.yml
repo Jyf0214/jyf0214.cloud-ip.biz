@@ -57,6 +57,10 @@ jobs:
           git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin || true
           pnpm install --filter=siliconflow-plugin --no-frozen-lockfile
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
+          git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
+          pnpm install --filter=xingluo-plugin --no-frozen-lockfile
+          git clone --depth 1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
+          pnpm i || true
           sudo apt-get install -y fonts-wqy-zenhei
           sudo apt-get install -y fontconfig
           fc-cache -fv
