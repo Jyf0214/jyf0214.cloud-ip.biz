@@ -2,9 +2,10 @@ name: Setup and Run Yunzai Bot
 
 on:
   schedule:
-    - cron: '0 6 * * 6'  # 周六
-    - cron: '0 6 * * 0'  # 周日
-    - cron: '0 6 * * 5'  # 周五
+    - cron: '0 0 * * *'   # 每天凌晨 0 点
+    - cron: '0 6 * * *'   # 每天早晨 6 点
+    - cron: '0 12 * * *'  # 每天中午 12 点
+    - cron: '0 18 * * *'  # 每天下午 6 点
   push:
     branches: [ "master", "main" ]
   pull_request:
@@ -21,29 +22,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Install Node.js
+      - name: Install system dependencies
         run: |
           sudo apt update
-          sudo apt install -y apt-transport-https curl ca-certificates software-properties-common
+          sudo apt install -y apt-transport-https curl ca-certificates software-properties-common redis-server git fonts-wqy-zenhei fontconfig
           curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
           sudo apt-get install -y nodejs
+          fc-cache -fv
           node -v
-
-      - name: Install Redis
-        run: |
-          sudo apt install -y redis-server
-          sudo systemctl status redis-server
-
-      - name: Install Git
-        run: |
-          sudo apt-get install -y git
           git --version
 
-      - name: Install pm2
-        run: |
-          sudo npm install -g pm2
+      - name: Install pm2 globally
+        run: sudo npm install -g pm2
 
-      - name: Clone Yunzai-Bot repository
+      - name: Clone Yunzai-Bot and plugins
         env:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
         run: |
@@ -59,47 +51,37 @@ jobs:
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
           git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
           pnpm install --filter=xingluo-plugin --no-frozen-lockfile
-          git clone --depth 1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
-          pnpm i || true
-          sudo apt-get install -y fonts-wqy-zenhei
-          sudo apt-get install -y fontconfig
-          fc-cache -fv
-
-      - name: Install dependencies
-        run: |
-          cd yunzai/
-          pnpm install -P  --no-frozen-lockfile
+          git clone --depth=1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
+          pnpm install -P --no-frozen-lockfile
 
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
           pm2 start app.js --name yunzai-bot
 
-      - name: Sleep for 5 hours and 45 minutes
-        run: |
-          sleep 21000
+      - name: Sleep to allow bot to run
+        run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
 
-      - name: Continue to next step
+      - name: Commit and push changes
         run: |
-          echo "监听结束，执行下一步"
+          echo "监听结束，推送更改"
           cd yunzai/
           git config --global user.name "Jyf0214"
           git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
           git add .
-          git commit -m "Initial commit"
-          git push
+          git commit -m "Update from workflow" || true
+          git push || true
 
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.8"]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
@@ -116,6 +98,7 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
+        # 缓存 pip 依赖以加速安装，当 requirements.txt 未变时重用缓存
 
       - name: Install pm2 globally
         run: npm install -g pm2
@@ -123,8 +106,7 @@ jobs:
       - name: Clone private repository
         env:
           PAT: ${{ secrets.PAT }}
-        run: |
-          git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
 
       - name: Install Python dependencies
         run: |
@@ -138,5 +120,5 @@ jobs:
           cd chatgpt-on-wechat
           pm2 start "python3 app.py" --name "my-python-app"
 
-      - name: Run shell script
-        run: sleep 21000
+      - name: Sleep to allow application to run
+        run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
