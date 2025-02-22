@@ -16,9 +16,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bot:
+  setup:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -71,19 +70,14 @@ jobs:
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           cd Real-ESRGAN
           poetry run python setup.py develop || true
-          cd ..
-          git clone --depth=1 https://gitee.com/TimeRainStarSky/RemBG || true
-          cd RemBG
-          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/u2net.onnx.xz || true
-          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/isnetis.onnx.xz || true
-          xz -dv u2net.onnx.xz isnetis.onnx.xz || true
-          cd ../../..
 
       - name: Rename _git to .git in plugins before running bot
         run: |
           cd yunzai/
-          find plugins/* -maxdepth 0 -type d -name "_git" -print0 | while IFS= read -r -d $'\0' dir; do
-            mv "$dir" "${dir%/_git}/.git"
+          for plugin in plugins/*; do
+            if [ -d "$plugin/_git" ]; then
+              mv "$plugin/_git" "$plugin/.git"
+            fi
           done
 
       - name: Start Yunzai Bot with pm2
@@ -94,19 +88,39 @@ jobs:
       - name: Sleep to allow bot to run
         run: sleep 2  # 运行约 5 小时 50 分钟
 
-      - name: Rename .git to _git in all plugin directories
+      - name: Optimize Git repositories and rename .git to _git before commit
         run: |
+          # 定义一个递归函数来处理每个目录
+          recursive_process() {
+            local current_dir="$1"
+            for item in "$current_dir"/*/; do
+              if [ -d "$item/.git" ]; then
+                echo "Processing Git repository at: $item"
+                # 尝试优化 Git 仓库，如果失败则输出错误但不退出
+                (cd "$item" && git gc || echo "git gc failed at $item")
+                (cd "$item" && git repack -a -d --depth=250 --window=250 || echo "git repack failed at $item")
+                # 重命名 .git 为 _git
+                mv "$item/.git" "$item/_git"
+              else
+                # 如果不是目标目录，递归处理子目录
+                recursive_process "$item"
+              fi
+            done
+          }
+          
+          # 主脚本逻辑
           cd yunzai/plugins
-          find . -type d -name ".git" -print0 | while IFS= read -r -d $'\0' dir; do
-            mv "$dir" "${dir%/.git}/_git"
-          done
+          recursive_process .
           cd ../..
-
-      - name: Remove TRSS-Plugin submodules
-        run: |
           cd yunzai/plugins/TRSS-Plugin
-          rm -rf Real-ESRGAN RemBG 
-          cd ../../..
+          # 使用 rm -rf 删除目录（会强制删除，不提示确认）
+          rm -rf Real-ESRGAN
+
+      - name: Clean up index.lock before committing
+        run: |
+          cd yunzai/
+          # 如果 index.lock 存在，删除它
+          rm -f .git/index.lock || true
 
       - name: Commit and push changes
         run: |
@@ -123,7 +137,6 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.8"]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
