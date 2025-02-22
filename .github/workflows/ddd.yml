@@ -114,9 +114,9 @@ jobs:
             for item in "$current_dir"/*/; do
               if [ -d "$item/.git" ]; then
                 echo "Processing Git repository at: $item"
-                # 优化 Git 仓库
-                (cd "$item" && git gc)
-                (cd "$item" && git repack -a -d --depth=250 --window=250)
+                # 尝试优化 Git 仓库，如果失败则输出错误但不退出
+                (cd "$item" && git gc || echo "git gc failed at $item")
+                (cd "$item" && git repack -a -d --depth=250 --window=250 || echo "git repack failed at $item")
                 # 重命名 .git 为 _git
                 mv "$item/.git" "$item/_git"
               else
@@ -125,11 +125,14 @@ jobs:
               fi
             done
           }
-      
+          
           # 主脚本逻辑
           cd yunzai/plugins
           recursive_process .
-
+          cd ../..
+          cd yunzai/plugins/TRSS-Plugin
+          # 使用 rm -rf 删除目录（会强制删除，不提示确认）
+          rm -rf Real-ESRGAN RemBG ChatWaifu GenshinVoice
 
       - name: Commit and push changes
         run: |
