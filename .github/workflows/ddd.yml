@@ -96,7 +96,7 @@ jobs:
           pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
-        run: sleep 2  # 运行约 5 小时 50 分钟
+        run: sleep 20400  # 运行约 5 小时 50 分钟
 
       - name: Optimize Git repositories and rename .git to _git before commit
         run: |
