@@ -92,7 +92,7 @@ jobs:
           pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
-        run: sleep 21000  # 运行约 5 小时 50 分钟
+        run: sleep 2  # 运行约 5 小时 50 分钟
 
       - name: Rename .git to _git in all plugin directories
         run: |
