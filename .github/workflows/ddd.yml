@@ -77,17 +77,6 @@ jobs:
           curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/u2net.onnx.xz || true
           curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/isnetis.onnx.xz || true
           xz -dv u2net.onnx.xz isnetis.onnx.xz || true
-          cd ..
-          git clone --depth=1 https://gitee.com/TimeRainStarSky/ChatWaifu || true
-          git clone --depth=1 https://gitee.com/TimeRainStarSky/GenshinVoice || true
-          cd ChatWaifu
-          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuCN.txz || true
-          tar -xvJf ChatWaifuCN.txz || true
-          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuJP.txz || true
-          tar -xvJf ChatWaifuJP.txz || true
-          cd ../GenshinVoice
-          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/G_809000.pth.xz || true
-          xz -dv G_809000.pth.xz || true
           cd ../../..
 
       - name: Rename _git to .git in plugins before running bot
@@ -116,7 +105,7 @@ jobs:
       - name: Remove TRSS-Plugin submodules
         run: |
           cd yunzai/plugins/TRSS-Plugin
-          rm -rf Real-ESRGAN RemBG ChatWaifu GenshinVoice
+          rm -rf Real-ESRGAN RemBG 
           cd ../../..
 
       - name: Commit and push changes
