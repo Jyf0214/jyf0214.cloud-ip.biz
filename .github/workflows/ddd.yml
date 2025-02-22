@@ -33,7 +33,7 @@ jobs:
           git --version
 
       - name: Install pm2 globally
-        run: sudo npm install -g pm2
+        run: sudo npm install -g pm2 || true
 
       - name: Clone Yunzai-Bot and plugins
         env:
@@ -41,18 +41,51 @@ jobs:
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git || true
           cd yunzai/
-          npm install -g pnpm
+          npm install -g pnpm || true
           git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin || true
-          pnpm install --filter=neko-status-plugin --no-frozen-lockfile
+          pnpm install --filter=neko-status-plugin --no-frozen-lockfile || true
           git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin || true
-          pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile
+          pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile || true
           git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin || true
-          pnpm install --filter=siliconflow-plugin --no-frozen-lockfile
+          pnpm install --filter=siliconflow-plugin --no-frozen-lockfile || true
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
           git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
-          pnpm install --filter=xingluo-plugin --no-frozen-lockfile
+          pnpm install --filter=xingluo-plugin --no-frozen-lockfile || true
           git clone --depth=1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
-          pnpm install -P --no-frozen-lockfile
+          git clone --depth=1 https://Yunzai.TRSS.me plugins/TRSS-Plugin || true
+          pnpm i --no-frozen-lockfile || true
+          pnpm install -P --no-frozen-lockfile || true
+          cd plugins/TRSS-Plugin
+          poetry install || true
+          git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
+          cd Real-ESRGAN
+          poetry run python setup.py develop || true
+          cd ..
+          git clone --depth=1 https://gitee.com/TimeRainStarSky/RemBG || true
+          cd RemBG
+          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/u2net.onnx.xz || true
+          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/isnetis.onnx.xz || true
+          xz -dv u2net.onnx.xz isnetis.onnx.xz || true
+          cd ..
+          git clone --depth=1 https://gitee.com/TimeRainStarSky/ChatWaifu || true
+          git clone --depth=1 https://gitee.com/TimeRainStarSky/GenshinVoice || true
+          # 语音合成 汉语模型：
+          cd ChatWaifu
+          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuCN.txz || true
+          tar -xvJf ChatWaifuCN.txz || true
+          cd ..
+          # 语音合成 日语模型：
+          cd ChatWaifu
+          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuJP.txz || true
+          tar -xvJf ChatWaifuJP.txz || true
+          cd ..
+          # 语音合成 原神模型：
+          cd GenshinVoice
+          curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/G_809000.pth.xz || true
+          xz -dv G_809000.pth.xz || true
+          # 返回主目录，并删除 plugins 目录下所有 .git 文件夹
+          cd ../../..
+          find plugins -type d -name .git -exec rm -rf {} + || true
 
       - name: Start Yunzai Bot with pm2
         run: |
@@ -101,24 +134,24 @@ jobs:
         # 缓存 pip 依赖以加速安装，当 requirements.txt 未变时重用缓存
 
       - name: Install pm2 globally
-        run: npm install -g pm2
+        run: npm install -g pm2 || true
 
       - name: Clone private repository
         env:
           PAT: ${{ secrets.PAT }}
-        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git || true
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip || true
           cd chatgpt-on-wechat
-          pip install -r requirements.txt
-          pip install -r requirements-optional.txt
+          pip install -r requirements.txt || true
+          pip install -r requirements-optional.txt || true
 
       - name: Start application with pm2
         run: |
           cd chatgpt-on-wechat
-          pm2 start "python3 app.py" --name "my-python-app"
+          pm2 start "python3 app.py" --name "my-python-app" || true
 
       - name: Sleep to allow application to run
         run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
