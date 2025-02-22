@@ -108,16 +108,28 @@ jobs:
 
       - name: Optimize Git repositories and rename .git to _git before commit
         run: |
-          cd yunzai/
-          for plugin in plugins/*; do
-            if [ -d "$plugin/.git" ]; then
-              cd "$plugin"
-              git gc
-              git repack -a -d --depth=250 --window=250
-              cd ..
-              mv "$plugin/.git" "$plugin/_git"
-            fi
-          done
+          # 定义一个递归函数来处理每个目录
+          recursive_process() {
+            local current_dir="$1"
+            for item in "$current_dir"/*/; do
+              if [ -d "$item/.git" ]; then
+                echo "Processing Git repository at: $item"
+                # 优化 Git 仓库
+                (cd "$item" && git gc)
+                (cd "$item" && git repack -a -d --depth=250 --window=250)
+                # 重命名 .git 为 _git
+                mv "$item/.git" "$item/_git"
+              else
+                # 如果不是目标目录，递归处理子目录
+                recursive_process "$item"
+              fi
+            done
+          }
+      
+          # 主脚本逻辑
+          cd yunzai/plugins
+          recursive_process .
+
 
       - name: Commit and push changes
         run: |
