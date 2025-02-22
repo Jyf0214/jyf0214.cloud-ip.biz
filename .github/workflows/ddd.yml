@@ -54,31 +54,42 @@ jobs:
           npm install -g pnpm || true
           git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin || true
           pnpm install --filter=neko-status-plugin --no-frozen-lockfile || true
+          cd /plugins/neko-status-plugin
+          mv _git .git || true
+          cd ../..
           git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin || true
           pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile || true
+          cd /plugins/nsfwjs-plugin
+          mv _git .git || true
+          cd ../..
           git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin || true
           pnpm install --filter=siliconflow-plugin --no-frozen-lockfile || true
+          cd /plugins/siliconflow-plugin
+          mv _git .git || true
+          cd ../..
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
+          cd /plugins/help-plugin
+          mv _git .git || true
+          cd ../..
           git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
           pnpm install --filter=xingluo-plugin --no-frozen-lockfile || true
+          cd /plugins/xingluo-plugin/
+          mv _git .git || true
+          cd ../..
           git clone --depth=1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
+          cd /plugins/ql-plugin
+          mv _git .git || true
+          cd ../..
           git clone --depth=1 https://Yunzai.TRSS.me plugins/TRSS-Plugin || true
           pnpm i --no-frozen-lockfile || true
           pnpm install -P --no-frozen-lockfile || true
           cd plugins/TRSS-Plugin
+          mv _git .git || true
+          cd ../..
           poetry install || true
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           cd Real-ESRGAN
           poetry run python setup.py develop || true
-
-      - name: Rename _git to .git in plugins before running bot
-        run: |
-          cd yunzai/
-          for plugin in plugins/*; do
-            if [ -d "$plugin/_git" ]; then
-              mv "$plugin/_git" "$plugin/.git"
-            fi
-          done
 
       - name: Start Yunzai Bot with pm2
         run: |
@@ -90,31 +101,32 @@ jobs:
 
       - name: Optimize Git repositories and rename .git to _git before commit
         run: |
-          # 定义一个递归函数来处理每个目录
-          recursive_process() {
-            local current_dir="$1"
-            for item in "$current_dir"/*/; do
-              if [ -d "$item/.git" ]; then
-                echo "Processing Git repository at: $item"
-                # 尝试优化 Git 仓库，如果失败则输出错误但不退出
-                (cd "$item" && git gc || echo "git gc failed at $item")
-                (cd "$item" && git repack -a -d --depth=250 --window=250 || echo "git repack failed at $item")
-                # 重命名 .git 为 _git
-                mv "$item/.git" "$item/_git"
-              else
-                # 如果不是目标目录，递归处理子目录
-                recursive_process "$item"
-              fi
-            done
-          }
-          
-          # 主脚本逻辑
-          cd yunzai/plugins
-          recursive_process .
-          cd ../..
+
           cd yunzai/plugins/TRSS-Plugin
           # 使用 rm -rf 删除目录（会强制删除，不提示确认）
           rm -rf Real-ESRGAN
+          cd ../..
+          cd /plugins/neko-status-plugin
+          mv .git _git || true
+          cd ../..
+          cd /plugins/nsfwjs-plugin
+          mv .git _git || true
+          cd ../..
+          cd /plugins/siliconflow-plugin
+          mv .git _git || true
+          cd ../..
+          cd /plugins/help-plugin
+          mv .git _git || true
+          cd ../..
+          cd /plugins/xingluo-plugin/
+          mv .git _git || true
+          cd ../..
+          cd /plugins/ql-plugin
+          mv .git _git || true
+          cd ../..
+          cd plugins/TRSS-Plugin
+          mv .git _git || true
+
 
       - name: Clean up index.lock before committing
         run: |
