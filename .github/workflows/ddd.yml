@@ -88,8 +88,8 @@ jobs:
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           pip uninstall torch torchvision
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-          pip install basicsr
           cd Real-ESRGAN  
+          pip install basicsr
           poetry install || true
           poetry run python setup.py develop || true
 
