@@ -79,23 +79,24 @@ jobs:
           cd ..
           git clone --depth=1 https://gitee.com/TimeRainStarSky/ChatWaifu || true
           git clone --depth=1 https://gitee.com/TimeRainStarSky/GenshinVoice || true
-          # 语音合成 汉语模型：
           cd ChatWaifu
           curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuCN.txz || true
           tar -xvJf ChatWaifuCN.txz || true
-          cd ..
-          # 语音合成 日语模型：
-          cd ChatWaifu
           curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/ChatWaifuJP.txz || true
           tar -xvJf ChatWaifuJP.txz || true
-          cd ..
-          # 语音合成 原神模型：
-          cd GenshinVoice
+          cd ../GenshinVoice
           curl -LO https://github.com/TimeRainStarSky/TRSS-Plugin/releases/download/latest/G_809000.pth.xz || true
           xz -dv G_809000.pth.xz || true
-          # 返回主目录，并删除 plugins 目录下所有 .git 文件夹
           cd ../../..
-          find plugins -type d -name .git -exec rm -rf {} + || true
+
+      - name: Rename _git to .git in plugins before running bot
+        run: |
+          cd yunzai/
+          for plugin in plugins/*; do
+            if [ -d "$plugin/_git" ]; then
+              mv "$plugin/_git" "$plugin/.git"
+            fi
+          done
 
       - name: Start Yunzai Bot with pm2
         run: |
@@ -103,7 +104,20 @@ jobs:
           pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
-        run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
+        run: sleep 2  # 运行约 5 小时 50 分钟
+1:
+      - name: Optimize Git repositories and rename .git to _git before commit
+        run: |
+          cd yunzai/
+          for plugin in plugins/*; do
+            if [ -d "$plugin/.git" ]; then
+              cd "$plugin"
+              git gc
+              git repack -a -d --depth=250 --window=250
+              cd ..
+              mv "$plugin/.git" "$plugin/_git"
+            fi
+          done
 
       - name: Commit and push changes
         run: |
