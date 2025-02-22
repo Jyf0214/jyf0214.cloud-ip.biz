@@ -115,8 +115,9 @@ jobs:
 
       - name: Remove TRSS-Plugin submodules
         run: |
-          cd yunzai/plugins
-          rm -rf TRSS-Plugin
+          cd yunzai/plugins/TRSS-Plugin
+          rm -rf Real-ESRGAN RemBG ChatWaifu GenshinVoice
+          cd ../../..
 
       - name: Commit and push changes
         run: |
