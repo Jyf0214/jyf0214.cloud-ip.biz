@@ -13,11 +13,12 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  setup:
+  bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
@@ -92,10 +93,8 @@ jobs:
       - name: Rename _git to .git in plugins before running bot
         run: |
           cd yunzai/
-          for plugin in plugins/*; do
-            if [ -d "$plugin/_git" ]; then
-              mv "$plugin/_git" "$plugin/.git"
-            fi
+          find plugins/* -maxdepth 0 -type d -name "_git" -print0 | while IFS= read -r -d $'\0' dir; do
+            mv "$dir" "${dir%/_git}/.git"
           done
 
       - name: Start Yunzai Bot with pm2
@@ -104,35 +103,20 @@ jobs:
           pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
-        run: sleep 2  # 运行约 5 小时 50 分钟
+        run: sleep 21000  # 运行约 5 小时 50 分钟
 
-      - name: Optimize Git repositories and rename .git to _git before commit
+      - name: Rename .git to _git in all plugin directories
         run: |
-          # 定义一个递归函数来处理每个目录
-          recursive_process() {
-            local current_dir="$1"
-            for item in "$current_dir"/*/; do
-              if [ -d "$item/.git" ]; then
-                echo "Processing Git repository at: $item"
-                # 尝试优化 Git 仓库，如果失败则输出错误但不退出
-                (cd "$item" && git gc || echo "git gc failed at $item")
-                (cd "$item" && git repack -a -d --depth=250 --window=250 || echo "git repack failed at $item")
-                # 重命名 .git 为 _git
-                mv "$item/.git" "$item/_git"
-              else
-                # 如果不是目标目录，递归处理子目录
-                recursive_process "$item"
-              fi
-            done
-          }
-          
-          # 主脚本逻辑
           cd yunzai/plugins
-          recursive_process .
+          find . -type d -name ".git" -print0 | while IFS= read -r -d $'\0' dir; do
+            mv "$dir" "${dir%/.git}/_git"
+          done
           cd ../..
-          cd yunzai/plugins/TRSS-Plugin
-          # 使用 rm -rf 删除目录（会强制删除，不提示确认）
-          rm -rf Real-ESRGAN RemBG ChatWaifu GenshinVoice
+
+      - name: Remove TRSS-Plugin submodules
+        run: |
+          cd yunzai/plugins
+          rm -rf TRSS-Plugin
 
       - name: Commit and push changes
         run: |
@@ -146,9 +130,11 @@ jobs:
 
   lint-and-test:
     runs-on: ubuntu-latest
+    needs: bot
     strategy:
       matrix:
         python-version: ["3.8"]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
