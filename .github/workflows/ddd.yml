@@ -54,30 +54,30 @@ jobs:
           npm install -g pnpm || true
           git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin || true
           pnpm install --filter=neko-status-plugin --no-frozen-lockfile || true
-          cd /plugins/neko-status-plugin
+          cd plugins/neko-status-plugin
           mv _git .git || true
           cd ../..
           git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin || true
           pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile || true
-          cd /plugins/nsfwjs-plugin
+          cd plugins/nsfwjs-plugin
           mv _git .git || true
           cd ../..
           git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin || true
           pnpm install --filter=siliconflow-plugin --no-frozen-lockfile || true
-          cd /plugins/siliconflow-plugin
+          cd plugins/siliconflow-plugin
           mv _git .git || true
           cd ../..
           git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
-          cd /plugins/help-plugin
+          cd plugins/help-plugin
           mv _git .git || true
           cd ../..
           git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
           pnpm install --filter=xingluo-plugin --no-frozen-lockfile || true
-          cd /plugins/xingluo-plugin/
+          cd plugins/xingluo-plugin/
           mv _git .git || true
           cd ../..
           git clone --depth=1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
-          cd /plugins/ql-plugin
+          cd plugins/ql-plugin
           mv _git .git || true
           cd ../..
           git clone --depth=1 https://Yunzai.TRSS.me plugins/TRSS-Plugin || true
@@ -106,22 +106,22 @@ jobs:
           # 使用 rm -rf 删除目录（会强制删除，不提示确认）
           rm -rf Real-ESRGAN
           cd ../..
-          cd /plugins/neko-status-plugin
+          cd plugins/neko-status-plugin
           mv .git _git || true
           cd ../..
-          cd /plugins/nsfwjs-plugin
+          cd plugins/nsfwjs-plugin
           mv .git _git || true
           cd ../..
-          cd /plugins/siliconflow-plugin
+          cd plugins/siliconflow-plugin
           mv .git _git || true
           cd ../..
-          cd /plugins/help-plugin
+          cd plugins/help-plugin
           mv .git _git || true
           cd ../..
-          cd /plugins/xingluo-plugin/
+          cd plugins/xingluo-plugin/
           mv .git _git || true
           cd ../..
-          cd /plugins/ql-plugin
+          cd plugins/ql-plugin
           mv .git _git || true
           cd ../..
           cd plugins/TRSS-Plugin
