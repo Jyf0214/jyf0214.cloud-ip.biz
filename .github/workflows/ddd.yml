@@ -41,7 +41,9 @@ jobs:
         run: sudo npm install -g pm2 || true
 
       - name: Install Poetry
-        run: curl -sSL https://install.python-poetry.org | python3 -
+        run: |
+          python3 -m pip install --user pipx
+          pipx install poetry
 
       - name: Clone Yunzai-Bot and plugins
         env:
