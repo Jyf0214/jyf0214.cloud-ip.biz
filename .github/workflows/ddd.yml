@@ -86,9 +86,9 @@ jobs:
           cd plugins/TRSS-Plugin
           mv _git .git || true
           cd ../..
-          poetry install || true
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
-          cd Real-ESRGAN
+          cd Real-ESRGAN  
+          poetry install || true
           poetry run python setup.py develop || true
 
       - name: Start Yunzai Bot with pm2
