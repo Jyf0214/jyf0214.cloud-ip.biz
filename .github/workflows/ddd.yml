@@ -85,7 +85,6 @@ jobs:
           pnpm install -P --no-frozen-lockfile || true
           cd plugins/TRSS-Plugin
           mv _git .git || true
-          cd ../..
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           cd Real-ESRGAN  
           poetry install || true
