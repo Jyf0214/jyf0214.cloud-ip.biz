@@ -192,7 +192,7 @@ jobs:
       - name: Start application with pm2
         run: |
           cd chatgpt-on-wechat
-          pm2 start "python3 app.py" --name "my-python-app" || true
+          python3 app.py
 
       - name: Sleep to allow application to run
         run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
