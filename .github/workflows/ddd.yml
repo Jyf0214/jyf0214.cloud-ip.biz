@@ -31,7 +31,6 @@ jobs:
           fc-cache -fv
           node -v
           git --version
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -44,7 +43,6 @@ jobs:
         run: |
           python3 -m pip install --user pipx
           pipx install poetry
-
       - name: Clone Yunzai-Bot and plugins
         env:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
@@ -87,23 +85,20 @@ jobs:
           mv _git .git || true
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           pip uninstall torch torchvision
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 || true
-          cd Real-ESRGAN  || true
-          pip install basicsr || true
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+          cd Real-ESRGAN  
+          pip install basicsr
           poetry install || true
           poetry run python setup.py develop || true
-
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
           pm2 start app.js --name yunzai-bot
-
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
 
       - name: Optimize Git repositories and rename .git to _git before commit
         run: |
-
           cd yunzai/plugins/TRSS-Plugin
           # 使用 rm -rf 删除目录（会强制删除，不提示确认）
           rm -rf Real-ESRGAN
@@ -128,14 +123,11 @@ jobs:
           cd ../..
           cd plugins/TRSS-Plugin
           mv .git _git || true
-
-
       - name: Clean up index.lock before committing
         run: |
           cd yunzai/
           # 如果 index.lock 存在，删除它
           rm -f .git/index.lock || true
-
       - name: Commit and push changes
         run: |
           echo "监听结束，推送更改"
@@ -145,7 +137,6 @@ jobs:
           git add .
           git commit -m "Update from workflow" || true
           git push || true
-
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
@@ -188,11 +179,9 @@ jobs:
           cd chatgpt-on-wechat
           pip install -r requirements.txt || true
           pip install -r requirements-optional.txt || true
-
       - name: Start application with pm2
         run: |
           cd chatgpt-on-wechat
           pm2 start "python3 app.py" --name "python-app" || true
-
       - name: Sleep to allow application to run
         run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
