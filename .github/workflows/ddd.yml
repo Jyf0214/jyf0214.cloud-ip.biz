@@ -87,9 +87,9 @@ jobs:
           mv _git .git || true
           git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
           pip uninstall torch torchvision
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-          cd Real-ESRGAN  
-          pip install basicsr
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 || true
+          cd Real-ESRGAN  || true
+          pip install basicsr || true
           poetry install || true
           poetry run python setup.py develop || true
 
