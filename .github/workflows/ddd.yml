@@ -94,9 +94,7 @@ jobs:
       - name: Optimize Git repositories and rename .git to _git before commit
         run: |
           cd yunzai/plugins/TRSS-Plugin
-          # 使用 rm -rf 删除目录（会强制删除，不提示确认）
-          rm -rf Real-ESRGAN
-          cd ../..
+          # 使用 rm -rf 删除目录
           cd plugins/neko-status-plugin
           mv .git _git || true
           cd ../..
