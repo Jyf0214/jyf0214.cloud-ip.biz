@@ -83,13 +83,7 @@ jobs:
           pnpm install -P --no-frozen-lockfile || true
           cd plugins/TRSS-Plugin
           mv _git .git || true
-          git clone --depth=1 https://gitee.com/TimeRainStarSky/Real-ESRGAN || true
-          pip uninstall torch torchvision
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-          cd Real-ESRGAN  
-          pip install basicsr
-          poetry install || true
-          poetry run python setup.py develop || true
+    
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
