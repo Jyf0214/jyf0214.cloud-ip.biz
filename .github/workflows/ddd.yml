@@ -91,35 +91,12 @@ jobs:
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
 
-      - name: Optimize Git repositories and rename .git to _git before commit
-        run: |
-          cd yunzai/plugins/TRSS-Plugin
-          # 使用 rm -rf 删除目录
-          cd plugins/neko-status-plugin
-          mv .git _git || true
-          cd ../..
-          cd plugins/nsfwjs-plugin
-          mv .git _git || true
-          cd ../..
-          cd plugins/siliconflow-plugin
-          mv .git _git || true
-          cd ../..
-          cd plugins/help-plugin
-          mv .git _git || true
-          cd ../..
-          cd plugins/xingluo-plugin/
-          mv .git _git || true
-          cd ../..
-          cd plugins/ql-plugin
-          mv .git _git || true
-          cd ../..
-          cd plugins/TRSS-Plugin
-          mv .git _git || true
       - name: Clean up index.lock before committing
         run: |
           cd yunzai/
           # 如果 index.lock 存在，删除它
           rm -f .git/index.lock || true
+
       - name: Commit and push changes
         run: |
           echo "监听结束，推送更改"
