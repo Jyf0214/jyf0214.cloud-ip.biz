@@ -50,44 +50,15 @@ jobs:
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git || true
           cd yunzai/
           npm install -g pnpm || true
-          git clone https://github.com/erzaozi/neko-status-plugin.git ./plugins/neko-status-plugin || true
-          pnpm install --filter=neko-status-plugin --no-frozen-lockfile || true
-          cd plugins/neko-status-plugin
-          mv _git .git || true
-          cd ../..
-          git clone https://github.com/CikeyQi/nsfwjs-plugin.git ./plugins/nsfwjs-plugin || true
-          pnpm install --filter=nsfwjs-plugin --no-frozen-lockfile || true
-          cd plugins/nsfwjs-plugin
-          mv _git .git || true
-          cd ../..
-          git clone https://github.com/AIGC-Yunzai/siliconflow-plugin.git ./plugins/siliconflow-plugin || true
-          pnpm install --filter=siliconflow-plugin --no-frozen-lockfile || true
-          cd plugins/siliconflow-plugin
-          mv _git .git || true
-          cd ../..
-          git clone https://gitee.com/tu-zhengxiong0925/help-plugin.git ./plugins/help-plugin || true
-          cd plugins/help-plugin
-          mv _git .git || true
-          cd ../..
-          git clone --depth=1 https://github.com/yll14/xingluo-plugin.git ./plugins/xingluo-plugin/ || true
-          pnpm install --filter=xingluo-plugin --no-frozen-lockfile || true
-          cd plugins/xingluo-plugin/
-          mv _git .git || true
-          cd ../..
-          git clone --depth=1 https://github.com/xwy231321/ql-plugin.git ./plugins/ql-plugin/ || true
-          cd plugins/ql-plugin
-          mv _git .git || true
-          cd ../..
-          git clone --depth=1 https://Yunzai.TRSS.me plugins/TRSS-Plugin || true
-          pnpm i --no-frozen-lockfile || true
-          pnpm install -P --no-frozen-lockfile || true
-          cd plugins/TRSS-Plugin
-          mv _git .git || true
+          pnpm i
+          pnpm install --filter=bili-plugin
+          
     
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
-          node app.js 
+          node run start
+
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
 
