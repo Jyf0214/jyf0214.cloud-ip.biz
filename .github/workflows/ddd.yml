@@ -44,6 +44,7 @@ jobs:
         run: |
           python3 -m pip install --user pipx
           pipx install poetry
+
       - name: Clone Yunzai-Bot and plugins
         env:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
@@ -58,7 +59,7 @@ jobs:
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
-          node run start
+          pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
