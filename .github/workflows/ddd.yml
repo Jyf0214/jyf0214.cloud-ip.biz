@@ -51,6 +51,7 @@ jobs:
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git || true
           cd yunzai/
+          git submodule update --init
           npm install -g pnpm || true
           pnpm i
           pnpm install --filter=bili-plugin
@@ -59,7 +60,7 @@ jobs:
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
-          node app
+          pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
