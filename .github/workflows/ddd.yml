@@ -53,8 +53,8 @@ jobs:
           cd yunzai/
           git submodule update --init
           npm install -g pnpm || true
-          pnpm i
-          pnpm install --filter=bili-plugin
+          pnpm i --no-frozen-lockfile
+          pnpm install --filter=bili-plugin --no-frozen-lockfile
           
     
       - name: Start Yunzai Bot with pm2
