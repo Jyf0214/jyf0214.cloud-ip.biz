@@ -65,7 +65,6 @@ jobs:
       - name: Start Yunzai Bot with pm2
         run: |
           cd yunzai/
-          node app.js
           pm2 start app.js --name yunzai-bot
 
       - name: Sleep to allow bot to run
