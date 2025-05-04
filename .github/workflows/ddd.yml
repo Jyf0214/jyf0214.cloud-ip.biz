@@ -28,6 +28,7 @@ jobs:
           sudo apt install -y apt-transport-https curl ca-certificates software-properties-common redis-server git fonts-wqy-zenhei fontconfig
           curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
           sudo apt-get install -y nodejs
+          sudo apt-get install -y redis-server
           fc-cache -fv
           node -v
           git --version
@@ -55,7 +56,7 @@ jobs:
           npm install -g pnpm || true
           pnpm i --no-frozen-lockfile
           pnpm install --filter=bili-plugin --no-frozen-lockfile
-          
+          redis-server --save 900 1 --save 300 10 --daemonize yes || true
     
       - name: Start Yunzai Bot with pm2
         run: |
