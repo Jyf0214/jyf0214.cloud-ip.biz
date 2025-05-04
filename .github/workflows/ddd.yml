@@ -56,7 +56,7 @@ jobs:
           npm install -g pnpm || true
           pnpm i --no-frozen-lockfile
           pnpm install --filter=bili-plugin --no-frozen-lockfile
-          redis-server --save 900 1 --save 300 10 --daemonize yes || true
+          
     
       - name: Start Yunzai Bot with pm2
         run: |
