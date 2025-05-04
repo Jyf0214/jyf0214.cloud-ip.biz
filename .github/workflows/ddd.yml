@@ -56,7 +56,9 @@ jobs:
           npm install -g pnpm || true
           pnpm i --no-frozen-lockfile
           pnpm install --filter=bili-plugin --no-frozen-lockfile
-          
+          pnpm install --filter=siliconflow-plugin
+          pnpm install --filter=ad-plugin
+          pnpm install --filter=guoba-plugin
     
       - name: Start Yunzai Bot with pm2
         run: |
