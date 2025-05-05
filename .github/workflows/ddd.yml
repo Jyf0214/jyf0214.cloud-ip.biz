@@ -46,6 +46,32 @@ jobs:
           python3 -m pip install --user pipx
           pipx install poetry
 
+      - name: Install base tools (curl, gpg, git)
+        run: sudo apt-get update && sudo apt-get install -y curl gpg git
+
+      - name: Create keyrings directory
+        run: sudo mkdir -p --mode=0755 /usr/share/keyrings
+      - name: Download Cloudflare GPG key
+        run: curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-main.gpg
+      - name: Add Cloudflare APT repository
+        run: echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+      - name: Update package list and install cloudflared
+        run: sudo apt-get update && sudo apt-get install -y cloudflared
+      - name: Verify cloudflared installation
+        run: cloudflared --version
+
+      - name: Clone private repository (veiled-journeys)
+        env:
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
+
+      - name: Start Cloudflared Tunnel in background
+        working-directory: ./veiled-journeys
+        run: |
+          echo "Starting Cloudflared tunnel..."
+          nohup cloudflared tunnel --config .cloudflared/config.yml run > cloudflared.log 2>&1 &
+          sleep 5
+
       - name: Clone Yunzai-Bot and plugins
         env:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
