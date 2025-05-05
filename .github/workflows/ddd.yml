@@ -83,8 +83,7 @@ jobs:
           git config --global user.name "Jyf0214"
           git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
           pm2 start "git add ." --name "python-app" || true
-          git commit -m "Update from workflow" || true
-          
+          pm2 start "git commit -m "Update from workflow" " --name "python-app" || true
           git push || true
   lint-and-test:
     runs-on: ubuntu-latest
