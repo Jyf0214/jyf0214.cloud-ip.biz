@@ -78,7 +78,7 @@ jobs:
         run: |
           git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git || true
           cd yunzai/
-          git submodule update --init
+          git submodule update --init || true
           npm install -g pnpm || true
           pnpm i --no-frozen-lockfile
           pnpm install --filter=bili-plugin --no-frozen-lockfile
