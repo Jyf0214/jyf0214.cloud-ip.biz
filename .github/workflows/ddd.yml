@@ -94,7 +94,7 @@ jobs:
 
       - name: Start Yunzai Bot with pm2
         run: |
-          cd yunzai/ # pm2 start app.js --name yunzai-bot
+          cd yunzai/ 
 
       - name: Sleep to allow bot to run
         run: sleep 20400  # 运行约 5 小时 50 分钟
