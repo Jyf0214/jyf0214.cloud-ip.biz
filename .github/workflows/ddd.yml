@@ -126,7 +126,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.9'
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -159,7 +159,6 @@ jobs:
       - name: Start application with pm2
         run: |
           cd chatgpt-on-wechat
-          python3 app.py
           pm2 start "python3 app.py" --name "python-app" || true
       - name: Sleep to allow application to run
         run: sleep 21000  # 运行约 5 小时 50 分钟以完成任务
