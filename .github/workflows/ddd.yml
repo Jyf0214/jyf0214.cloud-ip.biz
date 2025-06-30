@@ -60,60 +60,7 @@ jobs:
       - name: Verify cloudflared installation
         run: cloudflared --version
 
-      - name: Clone private repository (veiled-journeys)
-        env:
-          PAT: ${{ secrets.YUNZAIBOT_PAT }}
-        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
 
-      - name: Start Cloudflared Tunnel in background
-        working-directory: ./veiled-journeys
-        run: |
-          echo "Starting Cloudflared tunnel..."
-          nohup cloudflared tunnel --config .cloudflared/config.yml run > cloudflared.log 2>&1 &
-          sleep 5
-
-      - name: Clone Yunzai-Bot and plugins
-        env:
-          PAT: ${{ secrets.YUNZAIBOT_PAT }}
-        run: |
-          git clone https://x-access-token:${PAT}@github.com/Jyf0214/yunzai.git || true
-          cd yunzai/
-          git submodule update --init || true
-          npm install -g pnpm || true
-          pnpm i --no-frozen-lockfile
-          pnpm install --filter=bili-plugin --no-frozen-lockfile
-          pnpm install --filter=siliconflow-plugin
-          pnpm install --filter=ad-plugin
-          pnpm install --filter=guoba-plugin
-          sudo apt install -y gconf-service libasound2 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates fonts-liberation libappindicator1 libnss3 lsb-release xdg-utils wget fonts-wqy-zenhei fonts-wqy-microhei fonts-arphic-ukai fonts-arphic-uming || true
-          pnpm install --filter=neko-status-plugin
-          pnpm install --filter=skland-plugin
-          pnpm i
-          cd ./plugins/phi-plugin/ 
-          pnpm install -P
-
-      - name: Start Yunzai Bot with pm2
-        run: |
-          cd yunzai/ 
-
-      - name: Sleep to allow bot to run
-        run: sleep 20400  # 运行约 5 小时 50 分钟
-
-      - name: Clean up index.lock before committing
-        run: |
-          cd yunzai/
-          # 如果 index.lock 存在，删除它
-          rm -f .git/index.lock || true
-
-      - name: Commit and push changes
-        run: |
-          echo "监听结束，推送更改"
-          cd yunzai/
-          git config --global user.name "Jyf0214"
-          git config --global user.email "169313142+Jyf0214@users.noreply.github.com"
-          (git add . > /dev/null 2>&1) || true
-          (git commit -m "Update from workflow" > /dev/null 2>&1) || true
-          git push || true
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
