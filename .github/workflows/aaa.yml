@@ -47,3 +47,59 @@ jobs:
           # 确保这个步骤长时间运行，以便你有时间连接和调试
           # 如果你在 Upterm 会话中执行了所有调试操作，这个命令将确保会话不会立即结束
           sleep 21000
+
+      - name: Commit changes to veiled-journeys
+        # 此步骤将在调试会话结束（用户退出 Upterm 或 sleep 命令完成）后运行。
+        # 重要的是，此步骤在交互式调试完成后执行。
+        working-directory: veiled-journeys # 进入克隆的仓库目录
+        env:
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+        run: |
+          echo "Starting commit process for veiled-journeys..."
+          # 配置 Git 用户信息
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 确定目标分支。此处假设是 'main' 或 'master'。
+          # 如果你的默认分支是 'master' 或其他名称，请务必调整 'BRANCH_NAME'。
+          BRANCH_NAME="main" # <--- 重要：如果你的默认分支是 'master' 或其他名称，请在此处修改。
+
+          # 检查是否有任何（已暂存或未暂存的）更改
+          if git status --porcelain | grep -q .; then
+            echo "Changes detected in veiled-journeys. Attempting to commit and push."
+
+            # 在提交前拉取最新更改并进行 rebase，以避免合并冲突并保持提交历史线性
+            # 引入重试逻辑，以应对瞬时网络问题或快速并发提交
+            MAX_RETRIES=5
+            RETRY_COUNT=0
+            until git pull origin "$BRANCH_NAME" --rebase; do
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+                echo "Error: Failed to pull latest changes after $MAX_RETRIES attempts. Aborting commit."
+                exit 1
+              fi
+              echo "Pull failed. Retrying in 5 seconds..."
+              sleep 5
+            done
+            echo "Successfully pulled latest changes."
+
+            # 添加所有更改并提交
+            # '|| true' 或 '|| echo "..."' 用于在没有实际新更改时避免命令失败
+            git add .
+            git commit -m "Auto-commit from GitHub Actions debug workflow" || echo "No new changes to commit after rebase."
+
+            # 推送更改，并带有重试逻辑
+            RETRY_COUNT=0
+            until git push https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git "$BRANCH_NAME"; do
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+                echo "Error: Failed to push changes after $MAX_RETRIES attempts. Aborting commit."
+                exit 1
+              fi
+              echo "Push failed. Retrying in 5 seconds..."
+              sleep 5
+            done
+            echo "Changes committed and pushed successfully to $BRANCH_NAME."
+          else
+            echo "No changes detected in veiled-journeys. Skipping commit."
+          fi
