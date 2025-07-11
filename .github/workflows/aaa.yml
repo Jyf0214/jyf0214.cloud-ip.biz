@@ -100,7 +100,7 @@ jobs:
           # 设置SSH会话的最大持续时间为60分钟。
           # 达到此时间后，Upterm会话将自动结束，工作流将继续执行后续步骤。
           # 如果您在超时前手动断开SSH连接，工作流也会立即继续。
-          wait-timeout-minutes: 1
+          wait-timeout-minutes: 348
 
       # 调试会话前示例命令和保持会话的步骤已被移除，因为超时由action-upterm本身控制。
 
