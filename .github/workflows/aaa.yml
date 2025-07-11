@@ -42,4 +42,4 @@ jobs:
           echo "Press Ctrl+C in your SSH client to disconnect and proceed or finish."
           # 确保这个步骤长时间运行，以便你有时间连接和调试
           # 如果你在 Upterm 会话中执行了所有调试操作，这个命令将确保会话不会立即结束
-          sleep infinity # 保持会话永久开启，直到手动终止或 GitHub Actions 超时
+          sleep 21000
