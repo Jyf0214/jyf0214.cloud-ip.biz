@@ -127,7 +127,7 @@ jobs:
         run: |
           echo "Upterm会话已激活。请通过注释或日志中提供的URL使用SSH连接。"
           echo "在您的SSH客户端中按Ctrl+C以断开连接并继续或完成。"
-          sleep 21000
+          sleep 1
 
       - name: 提交更改到veiled-journeys
         working-directory: veiled-journeys
