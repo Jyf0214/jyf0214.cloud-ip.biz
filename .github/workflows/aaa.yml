@@ -16,6 +16,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18' # 根据你的项目需要设置 Node.js 版本
+      - name: Clone private repository
+        env:
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
 
 
       # 启用 Upterm 会话，允许 SSH 连接到 runner
