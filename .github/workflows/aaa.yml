@@ -1,0 +1,47 @@
+name: Debug with Upterm (SSH to Runner)
+
+on:
+  pull_request: # 当有拉取请求时触发
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: # 允许手动从 GitHub Actions UI 触发
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest # 在 Ubuntu runner 上运行
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (Optional, example for your project needs)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18' # 根据你的项目需要设置 Node.js 版本
+
+      - name: Install dependencies (Optional, example for your project needs)
+        run: npm install
+
+      # 启用 Upterm 会话，允许 SSH 连接到 runner
+      - name: Enable Upterm for debugging
+        uses: lhotari/action-upterm@v1
+        with:
+          # 推荐：限制只有触发此工作流的 GitHub 用户可以连接
+          # 如果设置为 true，Upterm 会将会话与触发者 GitHub 配置文件中注册的公共 SSH 密钥进行绑定。
+          # 你需要确保你的 SSH 公钥已添加到 GitHub 账户设置中。
+          limit-access-to-actor: true
+
+          # 可选：如果 'limit-access-to-actor' 为 false，你可以通过以下方式限制访问：
+          # limit-access-to-users: "your-github-username, another-github-username" # 允许特定用户连接
+          # ssh-keys: "${{ secrets.CUSTOM_DEBUG_SSH_PUBLIC_KEY }}" # 提供一个自定义的公共 SSH 密钥
+
+      # 在此处添加任何你想要在调试前执行的命令，
+      # 这些命令会在 Upterm 会话开始前完成
+      - name: Example command before debugging session
+        run: echo "Upterm session will start after this command. Now you can connect."
+
+      - name: Hold session for debugging (IMPORTANT!)
+        run: |
+          echo "Upterm session is active. Connect via SSH using the URL provided in the Annotations or Logs."
+          echo "Press Ctrl+C in your SSH client to disconnect and proceed or finish."
+          # 确保这个步骤长时间运行，以便你有时间连接和调试
+          # 如果你在 Upterm 会话中执行了所有调试操作，这个命令将确保会话不会立即结束
+          sleep infinity # 保持会话永久开启，直到手动终止或 GitHub Actions 超时
