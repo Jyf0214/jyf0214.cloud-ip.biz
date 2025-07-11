@@ -22,7 +22,7 @@ jobs:
         with:
           # 建议使用更稳定的Python版本，例如 '3.9', '3.10' 或 '3.11'
           # 当前日志显示使用的是Python 3.13.5，部分旧包可能不兼容。
-          python-version: '3.12'
+          python-version: '3.9'
 
       - name: 安装系统依赖
         run: |
