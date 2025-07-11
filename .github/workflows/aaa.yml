@@ -17,8 +17,6 @@ jobs:
         with:
           node-version: '18' # 根据你的项目需要设置 Node.js 版本
 
-      - name: Install dependencies (Optional, example for your project needs)
-        run: npm install
 
       # 启用 Upterm 会话，允许 SSH 连接到 runner
       - name: Enable Upterm for debugging
