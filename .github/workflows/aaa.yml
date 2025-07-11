@@ -17,11 +17,9 @@ jobs:
         with:
           node-version: '18'
 
-      - name: 设置Python 3.x
+      - name: 设置Python 3.9
         uses: actions/setup-python@v5
         with:
-          # 建议使用更稳定的Python版本，例如 '3.9', '3.10' 或 '3.11'
-          # 当前日志显示使用的是Python 3.13.5，部分旧包可能不兼容。
           python-version: '3.9'
 
       - name: 安装系统依赖
@@ -86,7 +84,6 @@ jobs:
       - name: 安装Python依赖
         run: |
           python -m pip install --upgrade pip
-          # 明确安装构建依赖，防止编译报错
           pip install setuptools wheel
           pip install -r requirements.txt
           pip check
@@ -96,20 +93,16 @@ jobs:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
         run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
 
-
       - name: 启用Upterm调试
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
+          # 设置SSH会话的最大持续时间为60分钟。
+          # 达到此时间后，Upterm会话将自动结束，工作流将继续执行后续步骤。
+          # 如果您在超时前手动断开SSH连接，工作流也会立即继续。
+          timeout: 1
 
-      - name: 调试会话前示例命令
-        run: echo "本命令执行后将启动Upterm会话，现在可以连接。"
-
-      - name: 保持会话用于调试
-        run: |
-          echo "Upterm会话已激活。请通过注释或日志中提供的URL使用SSH连接。"
-          echo "在您的SSH客户端中按Ctrl+C以断开连接并继续或完成。"
-          sleep 1
+      # 调试会话前示例命令和保持会话的步骤已被移除，因为超时由action-upterm本身控制。
 
       - name: 提交更改到veiled-journeys
         working-directory: veiled-journeys
@@ -120,7 +113,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          BRANCH_NAME="master"
+          BRANCH_NAME="master" # 请确保这个分支名称是正确的，如果您的主分支是 'main' 请修改
 
           if git status --porcelain | grep -q .; then
             echo "veiled-journeys检测到更改。尝试提交并推送。"
