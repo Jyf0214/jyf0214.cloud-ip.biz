@@ -25,15 +25,28 @@ jobs:
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            ffmpeg \
-            libsndfile1 \
-            libssl-dev \
-            zlib1g-dev \
-            curl \
-            wget
+          # 创建一个文件来记录要安装的系统包，用于缓存键
+          cat <<APT_PKGS > apt-packages.txt
+          build-essential
+          ffmpeg
+          libsndfile1
+          libssl-dev
+          zlib1g-dev
+          curl
+          wget
+          APT_PKGS
+          sudo apt-get install -y $(cat apt-packages.txt | tr '\n' ' ')
           echo "常用系统包已安装。"
+
+      - name: 缓存系统包
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: ${{ runner.os }}-apt-${{ hashFiles('apt-packages.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
 
       - name: 生成Python依赖文件
         run: |
@@ -97,7 +110,7 @@ jobs:
         run: |
           echo "Upterm会话已激活。请通过注释或日志中提供的URL使用SSH连接。"
           echo "在您的SSH客户端中按Ctrl+C以断开连接并继续或完成。"
-          sleep 1
+          sleep 21000
 
       - name: 提交更改到veiled-journeys
         working-directory: veiled-journeys
