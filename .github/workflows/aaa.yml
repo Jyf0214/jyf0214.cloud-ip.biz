@@ -109,7 +109,7 @@ jobs:
         run: |
           echo "Upterm会话已激活。请通过注释或日志中提供的URL使用SSH连接。"
           echo "在您的SSH客户端中按Ctrl+C以断开连接并继续或完成。"
-          sleep 21000 # 恢复为21000秒，确保有足够调试时间
+          sleep 1
 
       - name: 提交更改到veiled-journeys
         working-directory: veiled-journeys
@@ -120,7 +120,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          BRANCH_NAME="main"
+          BRANCH_NAME="master"
 
           if git status --porcelain | grep -q .; then
             echo "veiled-journeys检测到更改。尝试提交并推送。"
