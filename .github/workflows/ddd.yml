@@ -60,15 +60,15 @@ jobs:
         run: |
           python3 -m pip install --user pipx
           pipx install poetry
-          curl -o napcat.sh https://nclatest.znin.net/NapNeko/NapCat-Installer/main/script/install.sh && sudo bash napcat.sh --docker n --cli n --proxy 0 --force
+          curl -o napcat.sh https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh && sudo bash napcat.sh
           sudo cp -r ./napcat_config_backup /opt/QQ/resources/app/app_launcher/napcat/config
-          rm -rf Napcat
+          rm -rf napcat
 
       # 步骤6：克隆私有仓库
       - name: Clone private repository
         env:
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
-        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/napcat.git ./NapCat || true
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/napcat.git || true
 
       # 步骤7：安装基础工具 (curl, gpg, git)
       - name: Install base tools (curl, gpg, git)
