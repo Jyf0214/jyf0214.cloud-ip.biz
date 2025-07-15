@@ -61,7 +61,6 @@ jobs:
           python3 -m pip install --user pipx
           pipx install poetry
           curl -o napcat.sh https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh && sudo bash napcat.sh
-          sudo cp -r ./napcat_config_backup /opt/QQ/resources/app/app_launcher/napcat/config
           rm -rf napcat
 
       # 步骤6：克隆私有仓库
