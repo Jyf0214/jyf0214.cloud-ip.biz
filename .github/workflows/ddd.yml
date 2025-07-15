@@ -45,6 +45,8 @@ jobs:
         run: |
           python3 -m pip install --user pipx
           pipx install poetry
+          curl -o napcat.sh https://nclatest.znin.net/NapNeko/NapCat-Installer/main/script/install.sh && sudo bash napcat.sh --docker n --cli n --proxy 0 --force
+          sudo cp -r ./napcat_config_backup /opt/QQ/resources/app/app_launcher/napcat/config
 
       - name: Install base tools (curl, gpg, git)
         run: sudo apt-get update && sudo apt-get install -y curl gpg git
