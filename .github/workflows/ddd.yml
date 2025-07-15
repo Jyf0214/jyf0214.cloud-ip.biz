@@ -51,8 +51,8 @@ jobs:
         
 - name: Clone private repository
         env:
-          PAT: ${{ secrets.PAT }}
-        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/chatgpt-on-wechat.git || true
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/napcat.git ./NapCat || true
 
       - name: Install base tools (curl, gpg, git)
         run: sudo apt-get update && sudo apt-get install -y curl gpg git
