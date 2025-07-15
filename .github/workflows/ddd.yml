@@ -55,14 +55,20 @@ jobs:
       - name: Install pm2 globally
         run: sudo npm install -g pm2 || true
 
-      # 步骤5：安装 Poetry 和 NapCat
+            # 步骤5：安装 Poetry 和 NapCat
       - name: Install Poetry and NapCat
         run: |
           python3 -m pip install --user pipx
           pipx install poetry
+          
+          # 为 root 用户创建 curl 和 wget 的配置文件以禁用 SSL 校验
+          # 这是解决 SSL connection timeout 的核心
+          sudo sh -c 'echo "insecure" > /root/.curlrc && echo "check_certificate = off" > /root/.wgetrc'
+          
+          # 现在运行原始脚本，它内部的 curl/wget 调用将会自动忽略 SSL 错误
           curl -o napcat.sh https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh && sudo bash napcat.sh
+          
           rm -rf napcat
-
       # 步骤6：克隆私有仓库
       - name: Clone private repository
         env:
