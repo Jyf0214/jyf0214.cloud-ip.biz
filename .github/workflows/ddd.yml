@@ -68,7 +68,7 @@ jobs:
           # 现在运行原始脚本，它内部的 curl/wget 调用将会自动忽略 SSL 错误
           curl -o napcat.sh https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh && sudo bash napcat.sh
           
-          rm -rf napcat
+          sudo  rm -rf napcat
       # 步骤6：克隆私有仓库
       - name: Clone private repository
         env:
