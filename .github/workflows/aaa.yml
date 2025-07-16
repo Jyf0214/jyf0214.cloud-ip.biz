@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤 1：安装 rclone 和 Incus
-      - name: Install dependencies and Incus
+      # 步骤 1：安装依赖
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
@@ -35,7 +35,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y incus
 
-      # ********** 最终网络修复步骤 **********
       # 步骤 2：初始化 Incus 并配置网络 (NAT)
       - name: Initialize Incus and Configure Network
         run: |
@@ -43,8 +42,6 @@ jobs:
           sudo incus admin init --auto
           
           echo "Enabling NAT for the default network. This grants full internet access to containers."
-          # 为默认的 incusbr0 网络开启 IPv4 和 IPv6 的网络地址转换
-          # 这是最稳定、最通用的网络解决方案
           sudo incus network set incusbr0 ipv4.nat=true
           sudo incus network set incusbr0 ipv6.nat=true
 
@@ -66,17 +63,21 @@ jobs:
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
             echo "Backup found. Downloading and restoring..."
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
+            # 'import' 创建一个已停止的容器
             sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
+            # 在这里启动它
+            sudo incus start ${CONTAINER_NAME}
           else
             echo "No backup found. Launching new container..."
+            # 'launch' 会创建并自动启动容器，所以后面不需要再 start
             sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
           fi
-          # 启动容器并等待网络就绪
-          sudo incus start ${CONTAINER_NAME}
+          
+          # 等待网络就绪
+          echo "Waiting for container to be ready..."
           sleep 5 
           
           echo "Verifying container internet access..."
-          # 执行 apt-get update 作为验证
           sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
       # 步骤 5：启用 Upterm 调试会话
@@ -92,7 +93,8 @@ jobs:
       - name: Stop and Backup Container
         run: |
           echo "Stopping container..."
-          sudo incus stop ${CONTAINER_NAME}
+          # 使用 --force 确保即使容器已经停止也不会报错
+          sudo incus stop ${CONTAINER_NAME} --force
           echo "Exporting container..."
           sudo incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
           echo "Uploading new backup to WebDAV..."
