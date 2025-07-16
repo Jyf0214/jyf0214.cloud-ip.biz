@@ -53,39 +53,36 @@ jobs:
           pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
           " > ~/.config/rclone/rclone.conf
 
-      # 步骤 4：检查并恢复/创建容器 (使用宿主机网络)
+      # 步骤 4：检查并恢复/创建容器（使用 host 网络）
       - name: Check, Restore or Create Container with Host Networking
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
             echo "Backup found. Downloading and restoring..."
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
             sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
-            
+
             echo "Attaching host network to the restored container..."
-            # 为恢复的容器配置网络 (已移除多余的 name=eth0 选项)
-            sudo incus config device add ${CONTAINER_NAME} eth0 nic nictype=physical parent=eth0
-            
+            sudo incus config device add ${CONTAINER_NAME} eth0 nic network=host
+
             sudo incus start ${CONTAINER_NAME}
           else
             echo "No backup found. Launching new container with host networking..."
-            # 在创建时直接指定网络模式 (已移除多余的 name=eth0 选项)
-            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME} --device eth0,nictype=physical,parent=eth0,type=nic
+            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
+            sudo incus config device add ${CONTAINER_NAME} eth0 nic network=host
           fi
-          
+
           echo "Waiting for container to be ready..."
           sleep 5
-          
+
           echo "Verifying container internet access..."
           sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
-      # 步骤 5：启用 Upterm 调试会话
+      # 步骤 5：启用 Upterm 调试会话（SSH）
       - name: Enable Upterm debugging
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 348
-
-      # --- SSH 会话结束后，工作流从这里继续 ---
 
       # 步骤 6：停止并备份容器
       - name: Stop and Backup Container
