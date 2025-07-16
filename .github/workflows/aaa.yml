@@ -26,6 +26,46 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rclone
 
+      # 步骤3：设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # 步骤4：全局安装 pm2
+      - name: Install pm2 globally
+        run: sudo npm install -g pm2 || true
+
+            # 步骤5：安装 Poetry 和 NapCat
+      - name: Install Poetry and NapCat
+        run: |
+          python3 -m pip install --user pipx
+          pipx install poetry
+
+      # 步骤7：安装基础工具 (curl, gpg, git)
+      - name: Install base tools (curl, gpg, git)
+        run: sudo apt-get update && sudo apt-get install -y curl gpg git
+
+      # 步骤8：为 cloudflared 创建密钥环目录
+      - name: Create keyrings directory
+        run: sudo mkdir -p --mode=0755 /usr/share/keyrings
+
+      # 步骤9：下载 Cloudflare GPG 密钥
+      - name: Download Cloudflare GPG key
+        run: curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-main.gpg
+
+      # 步骤10：添加 Cloudflare APT 仓库
+      - name: Add Cloudflare APT repository
+        run: echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+
+      # 步骤11：更新包列表并安装 cloudflared
+      - name: Update package list and install cloudflared
+        run: sudo apt-get update && sudo apt-get install -y cloudflared
+
+      # 步骤12：验证 cloudflared 安装
+      - name: Verify cloudflared installation
+        run: cloudflared --version
+
       # 步骤 2：安装并初始化 Incus (LXD 的现代后继者)
       # Incus 的命令与 LXD 几乎完全相同，并且安装更稳定
       - name: Install and initialize Incus
