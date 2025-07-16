@@ -1,150 +1,134 @@
-name: Debug with Upterm (SSH to Runner)
+# 工作流名称
+name: LXD/Incus CI with SSH and WebDAV Backup
 
+# 触发条件：允许手动从 Actions 标签页触发
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
+# 定义工作流中使用的环境变量，方便修改
+env:
+  # Incus/LXD 容器的名称
+  CONTAINER_NAME: my-ci-container
+  # 备份文件的名称
+  BACKUP_FILE: incus_backup.tar.gz
+  # WebDAV 远程仓库的名称 (rclone 配置名)
+  WEBDAV_REMOTE: webdav_backup
+
 jobs:
-  debug:
+  build-and-debug:
+    # 使用最新的 Ubuntu 运行环境
     runs-on: ubuntu-latest
+
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: 设置Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: 安装系统依赖
+      # 步骤 1：安装 rclone 用于与 WebDAV 通信
+      - name: Install rclone
         run: |
           sudo apt-get update
-          cat <<APT_PKGS > apt-packages.txt
-          build-essential
-          ffmpeg
-          libsndfile1
-          libssl-dev
-          zlib1g-dev
-          curl
-          wget
-          APT_PKGS
-          sudo apt-get install -y $(cat apt-packages.txt | tr '\n' ' ')
-          echo "常用系统包已安装。"
+          sudo apt-get install -y rclone
 
-      - name: 缓存系统包
-        uses: actions/cache@v4
-        with:
-          path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: ${{ runner.os }}-apt-${{ hashFiles('apt-packages.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-
-
-      - name: 生成Python依赖文件
+      # 步骤 2：安装并初始化 Incus (LXD 的现代后继者)
+      # Incus 的命令与 LXD 几乎完全相同，并且安装更稳定
+      - name: Install and initialize Incus
         run: |
-          cat <<EOF > requirements.txt
-          openai==0.27.8
-          HTMLParser>=0.0.2
-          PyQRCode==1.2.1
-          qrcode==7.4.2
-          requests>=2.28.2
-          chardet>=5.1.0
-          Pillow
-          numpy<=1.24.2
-          
-          google-generativeai
-
-          dingtalk_stream
-
-          flask
-          schedule
-          cryptography>=39.0.0
-          resend>=0.1.0
-          huaweicloudsdkfunctiongraph>=3.0.0
-          huaweicloudsdkcore>=3.0.0
-          webdavclient3
+          sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
+          sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
+          Enabled: yes
+          Types: deb
+          URIs: https://pkgs.zabbly.com/incus/stable
+          Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+          Components: main
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /usr/share/keyrings/zabbly.gpg
           EOF
-          echo "requirements.txt文件已生成。"
+          sudo apt-get update
+          sudo apt-get install -y incus
+          # 自动初始化 Incus，无需交互
+          sudo incus admin init --auto
+          # 将当前用户添加到 incus-admin 组，避免后续命令都加 sudo
+          sudo usermod -a -G incus-admin $USER
+          newgrp incus-admin
 
-      - name: 缓存Python依赖
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-python-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-python-
-
-      - name: 安装Python依赖
+      # 步骤 3：配置 rclone 以连接到 WebDAV
+      # 使用 GitHub Secrets 安全地创建配置文件
+      - name: Configure rclone for WebDAV
         run: |
-          python -m pip install --upgrade pip
-          pip install setuptools wheel
-          pip install -r requirements.txt
-          pip check
+          mkdir -p ~/.config/rclone
+          echo "[${WEBDAV_REMOTE}]
+          type = webdav
+          url = ${{ secrets.WEBDAV_URL }}
+          vendor = other
+          user = ${{ secrets.WEBDAV_USER }}
+          pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
+          " > ~/.config/rclone/rclone.conf
 
-      - name: 克隆私有仓库
-        env:
-          PAT: ${{ secrets.YUNZAIBOT_PAT }}
-        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
+      # 步骤 4：检查 WebDAV 上是否存在备份
+      # 使用 rclone lsf 命令，如果文件存在，则返回文件名，否则返回空
+      - name: Check for existing backup on WebDAV
+        id: check_backup
+        run: |
+          # 如果文件存在，命令会成功并输出文件名；如果不存在，会失败但我们忽略错误
+          # 并通过检查输出的长度来判断文件是否存在
+          if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
+            echo "Backup found."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "No backup found."
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: 启用Upterm调试
+      # 步骤 5：如果备份存在，则下载并恢复容器
+      - name: Download and restore from backup
+        if: steps.check_backup.outputs.exists == 'true'
+        run: |
+          echo "Downloading backup from WebDAV..."
+          rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
+          echo "Importing container from backup..."
+          incus import ${BACKUP_FILE} ${CONTAINER_NAME}
+          incus start ${CONTAINER_NAME}
+
+      # 步骤 6：如果备份不存在，则创建新容器
+      - name: Create and setup new container
+        if: steps.check_backup.outputs.exists == 'false'
+        run: |
+          echo "Launching a new Ubuntu container..."
+          incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
+          echo "Waiting for container to get network..."
+          sleep 10
+          echo "Performing initial setup..."
+          # --- 在这里添加您的初始化命令 ---
+          # 例如：安装您需要的软件
+          # incus exec ${CONTAINER_NAME} -- apt-get update
+          # incus exec ${CONTAINER_NAME} -- apt-get install -y build-essential git
+          # ------------------------------------
+          echo "Container setup complete."
+
+      # 步骤 7：启用 Upterm 调试会话 (您的 SSH 任务占用时间)
+      # 工作流将在此暂停，直到 SSH 连接断开或超时
+      - name: Enable Upterm debugging
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          # 设置SSH会话的最大持续时间为60分钟。
-          # 达到此时间后，Upterm会话将自动结束，工作流将继续执行后续步骤。
-          # 如果您在超时前手动断开SSH连接，工作流也会立即继续。
-          wait-timeout-minutes: 348
+          wait-timeout-minutes: 300
 
-      # 调试会话前示例命令和保持会话的步骤已被移除，因为超时由action-upterm本身控制。
+      # --- SSH 会话结束后，工作流从这里继续 ---
 
-      - name: 提交更改到veiled-journeys
-        working-directory: veiled-journeys
-        env:
-          PAT: ${{ secrets.YUNZAIBOT_PAT }}
+      # 步骤 8：停止容器以确保数据一致性
+      - name: Stop container before backup
         run: |
-          echo "开始提交veiled-journeys仓库的更改..."
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Stopping container to ensure a consistent state for backup..."
+          incus stop ${CONTAINER_NAME}
 
-          BRANCH_NAME="master" # 请确保这个分支名称是正确的，如果您的主分支是 'main' 请修改
+      # 步骤 9：导出容器的当前状态为备份文件
+      - name: Export container to backup file
+        run: |
+          echo "Exporting container state..."
+          # 使用 --force 覆盖本地可能存在的旧备份文件
+          incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
 
-          if git status --porcelain | grep -q .; then
-            echo "veiled-journeys检测到更改。尝试提交并推送。"
-
-            MAX_RETRIES=5
-            RETRY_COUNT=0
-            until git pull origin "$BRANCH_NAME" --rebase; do
-              RETRY_COUNT=$((RETRY_COUNT+1))
-              if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-                echo "错误：尝试$MAX_RETRIES次后未能拉取最新更改。中止提交。"
-                exit 1
-              fi
-              echo "拉取失败。5秒后重试..."
-              sleep 5
-            done
-            echo "成功拉取最新更改。"
-
-            git add .
-            git commit -m "GitHub Actions调试工作流自动提交" || echo "rebase后没有新的更改需要提交。"
-
-            RETRY_COUNT=0
-            until git push https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git "$BRANCH_NAME"; do
-              RETRY_COUNT=$((RETRY_COUNT+1))
-              if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
-                echo "错误：尝试$MAX_RETRIES次后未能推送更改。中止提交。"
-                exit 1
-              fi
-              echo "推送失败。5秒后重试..."
-              sleep 5
-            done
-            echo "更改已成功提交并推送到$BRANCH_NAME。"
-          else
-            echo "veiled-journeys未检测到更改。跳过提交。"
-          fi
+      # 步骤 10：将新的备份文件上传到 WebDAV
+      - name: Upload new backup to WebDAV
+        run: |
+          echo "Uploading new backup to WebDAV..."
+          # 使用 copyto 会覆盖目标文件
+          rclone copyto ${BACKUP_FILE} ${WEBDAV_REMOTE}:${BACKUP_FILE}
+          echo "Backup complete."
