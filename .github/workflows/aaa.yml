@@ -1,11 +1,8 @@
-# 工作流名称
 name: Incus CI with SSH and WebDAV Backup (Host Networking - Final Syntax)
 
-# 触发条件
 on:
   workflow_dispatch:
 
-# 环境变量
 env:
   CONTAINER_NAME: my-ci-container
   BACKUP_FILE: incus_backup.tar.gz
@@ -16,12 +13,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤 1：安装依赖
+      # 1. 安装依赖
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
-          # 安装 Incus
           sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
           sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
           Enabled: yes
@@ -35,25 +31,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y incus
 
-      # 步骤 2：初始化 Incus
+      # 2. 初始化 Incus
       - name: Initialize Incus
         run: |
           echo "Initializing Incus..."
           sudo incus admin init --auto
 
-      # 步骤 3：配置 rclone
+      # 3. 配置 rclone
       - name: Configure rclone for WebDAV
         run: |
           mkdir -p ~/.config/rclone
-          echo "[${WEBDAV_REMOTE}]
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [${WEBDAV_REMOTE}]
           type = webdav
-          url = ${{ secrets.WEBDAV_URL }}
+          url  = ${{ secrets.WEBDAV_URL }}
           vendor = other
           user = ${{ secrets.WEBDAV_USER }}
           pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
-          " > ~/.config/rclone/rclone.conf
+          EOF
 
-      # 步骤 4：检查并恢复/创建容器（使用 host 网络）
+      # 4. 检查并恢复/创建容器（macvlan Host Networking）
       - name: Check, Restore or Create Container with Host Networking
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
@@ -61,14 +58,18 @@ jobs:
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
             sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
 
-            echo "Attaching host network to the restored container..."
-            sudo incus config device add ${CONTAINER_NAME} eth0 nic network=host
+            echo "Configuring macvlan host network on restored container..."
+            sudo incus config device add ${CONTAINER_NAME} eth0 nic \
+              nictype=macvlan parent=eth0
 
             sudo incus start ${CONTAINER_NAME}
           else
-            echo "No backup found. Launching new container with host networking..."
+            echo "No backup found. Launching new container..."
             sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
-            sudo incus config device add ${CONTAINER_NAME} eth0 nic network=host
+
+            echo "Adding macvlan host network..."
+            sudo incus config device add ${CONTAINER_NAME} eth0 nic \
+              nictype=macvlan parent=eth0
           fi
 
           echo "Waiting for container to be ready..."
@@ -77,14 +78,14 @@ jobs:
           echo "Verifying container internet access..."
           sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
-      # 步骤 5：启用 Upterm 调试会话（SSH）
+      # 5. 启用 Upterm 调试会话（SSH）
       - name: Enable Upterm debugging
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 348
 
-      # 步骤 6：停止并备份容器
+      # 6. 停止并备份容器
       - name: Stop and Backup Container
         run: |
           echo "Stopping container..."
