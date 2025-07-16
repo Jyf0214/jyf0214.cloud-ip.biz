@@ -1,34 +1,27 @@
 # 工作流名称
-name: Incus CI with SSH and WebDAV Backup
+name: Incus CI with SSH and WebDAV Backup (Robust Networking)
 
-# 触发条件：允许手动从 Actions 标签页触发
+# 触发条件
 on:
   workflow_dispatch:
 
-# 定义工作流中使用的环境变量，方便修改
+# 环境变量
 env:
-  # Incus 容器的名称
   CONTAINER_NAME: my-ci-container
-  # 备份文件的名称
   BACKUP_FILE: incus_backup.tar.gz
-  # WebDAV 远程仓库的名称 (rclone 配置名)
   WEBDAV_REMOTE: webdav_backup
 
 jobs:
   build-and-debug:
-    # 使用最新的 Ubuntu 运行环境
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤 1：安装 rclone
-      - name: Install rclone
+      # 步骤 1：安装 rclone 和 Incus
+      - name: Install dependencies and Incus
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
-
-      # 步骤 2：安装并初始化 Incus
-      - name: Install and initialize Incus
-        run: |
+          # 安装 Incus
           sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
           sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
           Enabled: yes
@@ -41,10 +34,21 @@ jobs:
           EOF
           sudo apt-get update
           sudo apt-get install -y incus
-          # 自动初始化 Incus，无需交互
-          sudo incus admin init --auto
 
-      # 步骤 3：配置 rclone 以连接到 WebDAV
+      # ********** 最终网络修复步骤 **********
+      # 步骤 2：初始化 Incus 并配置网络 (NAT)
+      - name: Initialize Incus and Configure Network
+        run: |
+          echo "Initializing Incus..."
+          sudo incus admin init --auto
+          
+          echo "Enabling NAT for the default network. This grants full internet access to containers."
+          # 为默认的 incusbr0 网络开启 IPv4 和 IPv6 的网络地址转换
+          # 这是最稳定、最通用的网络解决方案
+          sudo incus network set incusbr0 ipv4.nat=true
+          sudo incus network set incusbr0 ipv6.nat=true
+
+      # 步骤 3：配置 rclone
       - name: Configure rclone for WebDAV
         run: |
           mkdir -p ~/.config/rclone
@@ -56,45 +60,26 @@ jobs:
           pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
           " > ~/.config/rclone/rclone.conf
 
-      # 步骤 4：检查 WebDAV 上是否存在备份
-      - name: Check for existing backup on WebDAV
-        id: check_backup
+      # 步骤 4：检查并恢复/创建容器
+      - name: Check, Restore or Create Container
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
-            echo "Backup found."
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Backup found. Downloading and restoring..."
+            rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
+            sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
           else
-            echo "No backup found."
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No backup found. Launching new container..."
+            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
           fi
-
-      # 步骤 5：如果备份存在，则下载并恢复容器
-      - name: Download and restore from backup
-        if: steps.check_backup.outputs.exists == 'true'
-        run: |
-          echo "Downloading backup from WebDAV..."
-          rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
-          echo "Importing container from backup..."
-          sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
+          # 启动容器并等待网络就绪
           sudo incus start ${CONTAINER_NAME}
+          sleep 5 
+          
+          echo "Verifying container internet access..."
+          # 执行 apt-get update 作为验证
+          sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
-      # 步骤 6：如果备份不存在，则创建新容器
-      - name: Create and setup new container
-        if: steps.check_backup.outputs.exists == 'false'
-        run: |
-          echo "Launching a new Ubuntu container..."
-          sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
-          echo "Waiting for container to get network..."
-          sleep 10
-          echo "Performing initial setup..."
-          # --- 在这里添加您的初始化命令 (也需要使用 sudo) ---
-          # 例如：安装您需要的软件
-          # sudo incus exec ${CONTAINER_NAME} -- apt-get update
-          # sudo incus exec ${CONTAINER_NAME} -- apt-get install -y build-essential git
-          # ------------------------------------
-          echo "Container setup complete."
-
-      # 步骤 7：启用 Upterm 调试会话 (您的 SSH 任务占用时间)
+      # 步骤 5：启用 Upterm 调试会话
       - name: Enable Upterm debugging
         uses: lhotari/action-upterm@v1
         with:
@@ -103,23 +88,13 @@ jobs:
 
       # --- SSH 会话结束后，工作流从这里继续 ---
 
-      # 步骤 8：停止容器以确保数据一致性
-      - name: Stop container before backup
+      # 步骤 6：停止并备份容器
+      - name: Stop and Backup Container
         run: |
-          echo "Stopping container to ensure a consistent state for backup..."
+          echo "Stopping container..."
           sudo incus stop ${CONTAINER_NAME}
-
-      # 步骤 9：导出容器的当前状态为备份文件
-      - name: Export container to backup file
-        run: |
-          echo "Exporting container state..."
-          # 使用 --force 覆盖本地可能存在的旧备份文件
+          echo "Exporting container..."
           sudo incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
-
-      # 步骤 10：将新的备份文件上传到 WebDAV
-      - name: Upload new backup to WebDAV
-        run: |
           echo "Uploading new backup to WebDAV..."
-          # 使用 copyto 会覆盖目标文件
           rclone copyto ${BACKUP_FILE} ${WEBDAV_REMOTE}:${BACKUP_FILE}
           echo "Backup complete."
