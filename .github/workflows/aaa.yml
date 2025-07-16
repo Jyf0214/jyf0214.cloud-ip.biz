@@ -1,5 +1,5 @@
 # 工作流名称
-name: Incus CI with SSH and WebDAV Backup (Host Networking)
+name: Incus CI with SSH and WebDAV Backup (Host Networking - Final Syntax)
 
 # 触发条件
 on:
@@ -39,7 +39,6 @@ jobs:
       - name: Initialize Incus
         run: |
           echo "Initializing Incus..."
-          # 使用 --auto 初始化，但不创建默认网桥，因为我们不需要它
           sudo incus admin init --auto
 
       # 步骤 3：配置 rclone
@@ -57,34 +56,26 @@ jobs:
       # 步骤 4：检查并恢复/创建容器 (使用宿主机网络)
       - name: Check, Restore or Create Container with Host Networking
         run: |
-          # 定义网络配置参数，让容器直接使用宿主机网络
-          # -c security.nesting=true 是一个好的实践
-          # -d root,path=/ ... 是标准配置
-          # --device eth0,name=eth0,nictype=physical,parent=eth0,type=nic 这是关键，将宿主机的 eth0 直连给容器
-          # 如果在恢复时也想确保网络正确，可以先启动再配置，但直接创建时配置更干净
-          
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
             echo "Backup found. Downloading and restoring..."
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
             sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
             
             echo "Attaching host network to the restored container..."
-            # 为恢复的容器配置网络
-            sudo incus config device add ${CONTAINER_NAME} eth0 nic nictype=physical parent=eth0 name=eth0
+            # 为恢复的容器配置网络 (已移除多余的 name=eth0 选项)
+            sudo incus config device add ${CONTAINER_NAME} eth0 nic nictype=physical parent=eth0
             
             sudo incus start ${CONTAINER_NAME}
           else
             echo "No backup found. Launching new container with host networking..."
-            # 在创建时直接指定网络模式
-            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME} --device eth0,name=eth0,nictype=physical,parent=eth0,type=nic
+            # 在创建时直接指定网络模式 (已移除多余的 name=eth0 选项)
+            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME} --device eth0,nictype=physical,parent=eth0,type=nic
           fi
           
-          # 等待网络就绪
           echo "Waiting for container to be ready..."
           sleep 5
           
           echo "Verifying container internet access..."
-          # 在容器内执行 apt-get update 作为验证
           sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
       # 步骤 5：启用 Upterm 调试会话
