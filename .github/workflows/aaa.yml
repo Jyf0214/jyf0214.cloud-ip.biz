@@ -1,94 +1,100 @@
-# 工作流名称
-name: Incus CI with SSH and WebDAV Backup (Default Networking)
+name: CI with Persistent Chroot Environment
 
-# 触发条件
 on:
+  # 允许手动从 Actions 页面触发此工作流
   workflow_dispatch:
 
-# 环境变量
+# 设置环境变量，方便在工作流中引用
 env:
-  CONTAINER_NAME: my-ci-container
-  BACKUP_FILE: incus_backup.tar.gz
-  WEBDAV_REMOTE: webdav_backup
+  # chroot 环境的目标目录
+  CHROOT_DIR: /mnt/minisys
+  # 本地备份文件的名称
+  BACKUP_FILE: minisys_backup.tar.gz
+  # WebDAV 远端存储的路径
+  WEBDAV_REMOTE_PATH: "backup" # 您可以修改为您想要的 WebDAV 目录
 
 jobs:
   build-and-debug:
     runs-on: ubuntu-latest
-
     steps:
-      # 步骤 1：安装依赖
-      - name: Install dependencies
+      - name: 1. Install Dependencies (debootstrap, rclone)
         run: |
           sudo apt-get update
-          sudo apt-get install -y rclone
-          # 安装 Incus
-          sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
-          sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
-          Enabled: yes
-          Types: deb
-          URIs: https://pkgs.zabbly.com/incus/stable
-          Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-          Components: main
-          Architectures: $(dpkg --print-architecture)
-          Signed-By: /usr/share/keyrings/zabbly.gpg
-          EOF
-          sudo apt-get update
-          sudo apt-get install -y incus
+          sudo apt-get install -y debootstrap rclone
 
-      # 步骤 2：初始化 Incus
-      - name: Initialize Incus
+      - name: 2. Restore or Create Chroot Environment
+        env:
+          # 从仓库的 Secrets 中读取 WebDAV 凭据
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "Initializing Incus..."
-          # 使用 --auto 初始化，自动创建默认桥接网络 incusbr0
-          sudo incus admin init --auto
+          echo "Configuring rclone for WebDAV..."
+          # 非交互式地配置 rclone，凭据通过环境变量传递，更加安全
+          rclone config create webdav webdav \
+            url="${WEBDAV_URL}" \
+            vendor="other" \
+            user="${WEBDAV_USER}" \
+            pass="${WEBDAV_PASS}"
 
-      # 步骤 3：配置 rclone
-      - name: Configure rclone for WebDAV
-        run: |
-          mkdir -p ~/.config/rclone
-          echo "[${WEBDAV_REMOTE}]
-          type = webdav
-          url = ${{ secrets.WEBDAV_URL }}
-          vendor = other
-          user = ${{ secrets.WEBDAV_USER }}
-          pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
-          " > ~/.config/rclone/rclone.conf
-
-      # 步骤 4：检查并恢复/创建容器 (使用默认桥接网络)
-      - name: Check, Restore or Create Container with Default Networking
-        run: |
-          if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
-            echo "Backup found. Downloading and restoring..."
-            rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
-            sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
-            sudo incus start ${CONTAINER_NAME}
+          echo "Checking for existing backup on WebDAV..."
+          # 检查远端备份文件是否存在。rclone ls 如果找不到文件会返回非零退出码
+          if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null; then
+            echo "✅ Backup found. Restoring from WebDAV..."
+            # 从 WebDAV 下载备份
+            rclone copy webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} .
+            
+            echo "Extracting backup..."
+            sudo mkdir -p ${{ env.CHROOT_DIR }}
+            # 使用 tar 解压备份文件到 chroot 目录。-p 标志保留文件权限
+            sudo tar -xpf ${{ env.BACKUP_FILE }} -C ${{ env.CHROOT_DIR }}
+            
           else
-            echo "No backup found. Launching new container with default networking..."
-            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
+            echo "ℹ️ No backup found. Creating a fresh Ubuntu 22.04 (Jammy) system..."
+            sudo mkdir -p ${{ env.CHROOT_DIR }}
+            # 使用 debootstrap 创建一个最小化的 Ubuntu Jammy 系统
+            sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
           fi
-          
-          # 等待网络就绪
-          echo "Waiting for container to be ready..."
-          sleep 5
-          
-          echo "Verifying container internet access..."
-          # 在容器内执行 apt-get update 作为验证
-          sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
-      # 步骤 5：启用 Upterm 调试会话
-      - name: Enable Upterm debugging
+      - name: 3. (Optional) Inject Parameters before session
+        run: |
+          echo "Injecting custom environment variables into the chroot system..."
+          # 这是一个示例，演示如何“传入参数”。这里我们将一个变量写入 chroot 环境的 profile 文件中
+          # 当您 chroot 进去并登录 shell 时，这个变量就会生效
+          sudo bash -c 'echo "export MY_CUSTOM_PARAM=HelloFromCI" >> ${{ env.CHROOT_DIR }}/etc/profile'
+          
+      - name: 4. Enable Upterm Debugging Session (Your Task Area)
+        # 这是您提供的步骤，用于占用和进行手动操作
+        # 工作流将在此处暂停，直到 SSH 连接断开或超时
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 348
 
-      # 步骤 6：停止并备份容器
-      - name: Stop and Backup Container
+      - name: 5. Create Backup of Chroot Environment
+        # 仅当工作流不是因为被取消才运行时执行此步骤
+        if: ${{ !cancelled() }}
+        env:
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "Stopping container..."
-          sudo incus stop ${CONTAINER_NAME} --force
-          echo "Exporting container..."
-          sudo incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
-          echo "Uploading new backup to WebDAV..."
-          rclone copyto ${BACKUP_FILE} ${WEBDAV_REMOTE}:${BACKUP_FILE}
-          echo "Backup complete."
+          echo "Creating backup archive from ${{ env.CHROOT_DIR }}..."
+          # 将 chroot 目录打包压缩。-C 参数可以避免在压缩包内包含 /mnt/minisys 的父路径
+          # --numeric-owner 确保用户和组 ID 被保留，而不是它们的名称
+          sudo tar -cpf /tmp/${BACKUP_FILE} --numeric-owner -C ${{ env.CHROOT_DIR }} .
+          # 使用 gzip 进行压缩
+          sudo gzip -f /tmp/${BACKUP_FILE}
+          
+          echo "Uploading backup to WebDAV at webdav:${WEBDAV_REMOTE_PATH}/..."
+          # 再次配置 rclone
+          rclone config create webdav webdav \
+            url="${WEBDAV_URL}" \
+            vendor="other" \
+            user="${WEBDAV_USER}" \
+            pass="${WEBDAV_PASS}"
+            
+          # 上传新的备份文件
+          rclone copy /tmp/${BACKUP_FILE}.gz webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} --progress
+
+          echo "✅ Backup process completed."
