@@ -1,5 +1,5 @@
 # 工作流名称
-name: Incus CI with SSH and WebDAV Backup (MACVLAN Networking)
+name: Incus CI with SSH and WebDAV Backup (Official Action)
 
 # 触发条件
 on:
@@ -8,45 +8,24 @@ on:
 # 环境变量
 env:
   CONTAINER_NAME: my-ci-container
-  BACKUP_FILE: incus_backup.tar.gz
+  BACKUP_FILE: lxd_backup.tar.gz # LXD 默认可能使用 .tar.gz
   WEBDAV_REMOTE: webdav_backup
-  # 定义 macvlan 网络的名称
-  MACVLAN_NETWORK: macvlannet
 
 jobs:
   build-and-debug:
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤 1：安装依赖
-      - name: Install dependencies
+      # 步骤 1：使用官方 Action 安装并配置好一个网络通畅的 LXD
+      # 这是最关键的一步，它解决了我们之前遇到的所有网络问题。
+      - name: Setup LXD with proper networking
+        uses: canonical/setup-lxd@v1.1.0 # 推荐固定版本以保证稳定性
+
+      # 步骤 2：安装 rclone
+      - name: Install rclone
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
-          # 安装 Incus
-          sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
-          sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
-          Enabled: yes
-          Types: deb
-          URIs: https://pkgs.zabbly.com/incus/stable
-          Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
-          Components: main
-          Architectures: $(dpkg --print-architecture)
-          Signed-By: /usr/share/keyrings/zabbly.gpg
-          EOF
-          sudo apt-get update
-          sudo apt-get install -y incus
-
-      # 步骤 2：初始化 Incus 并配置 Macvlan 网络
-      - name: Initialize Incus and Configure Macvlan Network
-        run: |
-          echo "Initializing Incus..."
-          sudo incus admin init --auto
-          
-          echo "Creating macvlan network..."
-          # 创建一个 macvlan 网络，并将其附加到宿主机的 eth0 网卡上
-          # 这将允许容器直接从宿主机所在的网络获取 IP 地址，如同一个独立的物理设备
-          sudo incus network create ${MACVLAN_NETWORK} --type=macvlan parent=eth0
 
       # 步骤 3：配置 rclone
       - name: Configure rclone for WebDAV
@@ -60,32 +39,33 @@ jobs:
           pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
           " > ~/.config/rclone/rclone.conf
 
-      # 步骤 4：检查并恢复/创建容器 (使用 Macvlan 网络)
-      - name: Check, Restore or Create Container with Macvlan Networking
+      # 步骤 4：检查并恢复/创建容器
+      # 注意：现在所有 lxc 命令都需要以 `lxc` 而不是 `incus` 执行
+      - name: Check, Restore or Create Container
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
             echo "Backup found. Downloading and restoring..."
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
-            sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
-            sudo incus start ${CONTAINER_NAME}
-            
-            echo "Attaching macvlan network to the restored container..."
-            # 为恢复的容器附加 macvlan 网络设备
-            sudo incus config device add ${CONTAINER_NAME} eth0 nic network=${MACVLAN_NETWORK}
+            # lxd import 会创建一个已停止的容器
+            lxd import ${BACKUP_FILE}
+            # 'import' 命令默认使用备份文件中的原始容器名
+            # 为了保险起见，我们先获取原始名称再启动
+            ORIGINAL_NAME=$(tar -xOf ${BACKUP_FILE} backup/index.yaml | grep 'name:' | awk '{print $2}')
+            lxc start ${ORIGINAL_NAME}
+            # 如果需要，可以重命名为标准名称
+            lxc rename ${ORIGINAL_NAME} ${CONTAINER_NAME}
           else
-            echo "No backup found. Launching new container with macvlan networking..."
-            # 在创建时直接指定使用我们创建的 macvlan 网络
-            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME} --network ${MACVLAN_NETWORK}
+            echo "No backup found. Launching new container..."
+            # `lxc launch` 默认使用官方配置好的网络，直接就能联网
+            lxc launch ubuntu:22.04 ${CONTAINER_NAME}
           fi
           
-          echo "Waiting for container to acquire IP address..."
-          # 关键：根据社区经验，等待几秒钟以防止网络配置的竞争条件
+          echo "Waiting for container to settle..."
           sleep 10
           
           echo "Verifying container internet access..."
-          # 为了增加可靠性，先 ping 一个 IP 地址再测试 DNS 解析
-          sudo incus exec ${CONTAINER_NAME} -- ping -c 3 8.8.8.8
-          sudo incus exec ${CONTAINER_NAME} -- apt-get update
+          # `lxc exec` 同样不需要 sudo
+          lxc exec ${CONTAINER_NAME} -- apt-get update
 
       # 步骤 5：启用 Upterm 调试会话
       - name: Enable Upterm debugging
@@ -100,9 +80,9 @@ jobs:
       - name: Stop and Backup Container
         run: |
           echo "Stopping container..."
-          sudo incus stop ${CONTAINER_NAME} --force
+          lxc stop ${CONTAINER_NAME} --force
           echo "Exporting container..."
-          sudo incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
+          lxc export ${CONTAINER_NAME} ${BACKUP_FILE} --force
           echo "Uploading new backup to WebDAV..."
           rclone copyto ${BACKUP_FILE} ${WEBDAV_REMOTE}:${BACKUP_FILE}
           echo "Backup complete."
