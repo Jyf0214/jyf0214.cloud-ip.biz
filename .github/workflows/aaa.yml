@@ -61,7 +61,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 348
+          wait-timeout-minutes: 100
 
       - name: 6. 卸载 Chroot 环境的虚拟文件系统 (关键步骤)
         # 使用 if: always() 确保此步骤总是运行，即使用户会话失败或被取消
