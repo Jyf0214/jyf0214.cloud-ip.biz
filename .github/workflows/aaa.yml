@@ -76,7 +76,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 348
+          wait-timeout-minutes: 90
 
       - name: 6. 备份系统环境到 WebDAV
         # 仅当工作流不是因为被取消才运行此步骤
