@@ -1,4 +1,4 @@
-name: CI with Persistent Chroot Environment (Optimized, Chinese UI)
+name: CI with Persistent Chroot Environment (Final Version)
 
 on:
   workflow_dispatch:
@@ -16,15 +16,9 @@ jobs:
         run: |
           echo "清理前，初始磁盘空间："
           df -h /
-          
           echo "开始清理预装软件以释放空间..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           echo "✅ 清理完成，当前可用空间："
-          # 这个命令会显示根目录'/'的文件系统使用情况，'Avail'列即为可用空间
           df -h /
 
       - name: 2. 安装所需依赖
@@ -38,47 +32,52 @@ jobs:
           WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "正在配置 rclone 以连接 WebDAV..."
-          rclone config create webdav webdav \
-            url="${WEBDAV_URL}" \
-            vendor="other" \
-            user="${WEBDAV_USER}" \
-            pass="${WEBDAV_PASS}"
-
+          echo "正在配置 rclone..."
+          rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
           echo "正在检查 WebDAV 上是否存在备份..."
-          # 使用 rclone lsf 检查文件是否存在。如果文件不存在，该命令将返回一个非零的退出代码。
           if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null; then
             echo "✅ 发现备份。正在从云端流式恢复系统..."
             sudo mkdir -p ${{ env.CHROOT_DIR }}
-            
-            # 优化点：直接从云端流式解压，不占用本地磁盘空间作为中转
-            # rclone cat 将文件内容输出到标准输出(stdout)
-            # | (管道) 将 stdout 的数据流传给下一个命令
-            # sudo tar 从标准输入(-)读取数据流，并解压(-x)到指定目录(-C)
             rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | sudo tar -xzpf - -C ${{ env.CHROOT_DIR }}
-            
           else
-            echo "ℹ️ 未发现备份。将使用 debootstrap 创建一个新的 Ubuntu 22.04 系统..."
+            echo "ℹ️ 未发现备份。将创建新系统..."
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
           fi
           echo "✅ 系统准备就绪。当前磁盘空间："
           df -h /
 
-      - name: 4. (可选) 在会话开始前注入参数
+      - name: 4. 挂载虚拟文件系统到 Chroot 环境
         run: |
-          # 这是一个示例，演示如何不启动容器就传入参数
-          # 它将一个环境变量追加到 chroot 环境的全局配置文件中
-          echo "export MY_CUSTOM_PARAM=HelloFromCI" | sudo tee -a ${{ env.CHROOT_DIR }}/etc/profile > /dev/null
-          
+          echo "为了让 chroot 环境内的程序能正常工作，正在挂载虚拟文件系统..."
+          MNT_DIR=${{ env.CHROOT_DIR }}
+          sudo mount -t proc proc "${MNT_DIR}/proc"
+          sudo mount -o bind /dev "${MNT_DIR}/dev"
+          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
+          sudo mount -o bind /sys "${MNT_DIR}/sys"
+          echo "✅ 所有必要的虚拟文件系统已挂载。"
+
       - name: 5. 启用 Upterm 调试会话 (用户操作区)
-        # 此处工作流会暂停，等待您通过 SSH 连接并操作
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 90
+          wait-timeout-minutes: 348
 
-      - name: 6. 备份系统环境到 WebDAV
+      - name: 6. 卸载 Chroot 环境的虚拟文件系统 (关键步骤)
+        # 使用 if: always() 确保此步骤总是运行，即使用户会话失败或被取消
+        # 这是为了保证 chroot 目录在备份前一定是“干净”的
+        if: always()
+        run: |
+          echo "会话结束。为了安全备份，正在卸载所有虚拟文件系统..."
+          MNT_DIR=${{ env.CHROOT_DIR }}
+          # 使用 -l (lazy) 选项可以增加卸载的成功率，以防万一有进程仍在占用
+          sudo umount -l "${MNT_DIR}/dev/pts"
+          sudo umount -l "${MNT_DIR}/dev"
+          sudo umount -l "${MNT_DIR}/proc"
+          sudo umount -l "${MNT_DIR}/sys"
+          echo "✅ 虚拟文件系统已全部卸载。"
+
+      - name: 7. 备份系统环境到 WebDAV
         # 仅当工作流不是因为被取消才运行此步骤
         if: ${{ !cancelled() }}
         env:
@@ -86,17 +85,7 @@ jobs:
           WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "任务结束，开始流式打包并上传备份..."
-          rclone config create webdav webdav \
-            url="${WEBDAV_URL}" \
-            vendor="other" \
-            user="${WEBDAV_USER}" \
-            pass="${WEBDAV_PASS}"
-
-          # 优化点：流式打包上传，避免在本地生成巨大的临时压缩包
-          # sudo tar 将 chroot 目录打包(-c)并压缩(-z)，然后将结果输出到标准输出(-)
-          # | (管道) 将 tar 命令产生的数据流直接传给 rclone
-          # rclone rcat 从标准输入读取数据流并上传到 WebDAV
+          echo "开始流式打包并上传备份..."
+          rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
           sudo tar -czpf - -C ${{ env.CHROOT_DIR }} . | rclone rcat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} --progress
-
-          echo "✅ 备份流程执行完毕"
+          echo "✅ 备份流程执行完毕。"
