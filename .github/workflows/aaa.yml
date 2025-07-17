@@ -11,7 +11,7 @@ env:
   # 本地备份文件的名称
   BACKUP_FILE: minisys_backup.tar.gz
   # WebDAV 远端存储的路径
-  WEBDAV_REMOTE_PATH: "backup" # 您可以修改为您想要的 WebDAV 目录
+  WEBDAV_REMOTE_PATH: "Github-action-backup" # 您可以修改为您想要的 WebDAV 目录
 
 jobs:
   build-and-debug:
