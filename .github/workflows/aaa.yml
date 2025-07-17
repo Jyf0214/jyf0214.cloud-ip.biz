@@ -1,5 +1,5 @@
 # 工作流名称
-name: Incus CI with SSH and WebDAV Backup (Official Action - Correct Version)
+name: Incus CI with SSH and WebDAV Backup (Default Networking)
 
 # 触发条件
 on:
@@ -8,7 +8,7 @@ on:
 # 环境变量
 env:
   CONTAINER_NAME: my-ci-container
-  BACKUP_FILE: lxd_backup.tar.gz
+  BACKUP_FILE: incus_backup.tar.gz
   WEBDAV_REMOTE: webdav_backup
 
 jobs:
@@ -16,16 +16,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步骤 1：使用官方 Action 安装并配置好一个网络通畅的 LXD
-      # 这是最关键的一步，使用了正确的 @v1 版本标签。
-      - name: Setup LXD with proper networking
-        uses: canonical/setup-lxd@v1
-
-      # 步骤 2：安装 rclone
-      - name: Install rclone
+      # 步骤 1：安装依赖
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y rclone
+          # 安装 Incus
+          sudo curl -fsSL https://pkgs.zabbly.com/key.asc | sudo gpg --dearmor -o /usr/share/keyrings/zabbly.gpg
+          sudo sh -c "cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources" <<EOF
+          Enabled: yes
+          Types: deb
+          URIs: https://pkgs.zabbly.com/incus/stable
+          Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+          Components: main
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /usr/share/keyrings/zabbly.gpg
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y incus
+
+      # 步骤 2：初始化 Incus
+      - name: Initialize Incus
+        run: |
+          echo "Initializing Incus..."
+          # 使用 --auto 初始化，自动创建默认桥接网络 incusbr0
+          sudo incus admin init --auto
 
       # 步骤 3：配置 rclone
       - name: Configure rclone for WebDAV
@@ -39,30 +54,26 @@ jobs:
           pass = $(echo '${{ secrets.WEBDAV_PASS }}' | rclone obscure -)
           " > ~/.config/rclone/rclone.conf
 
-      # 步骤 4：检查并恢复/创建容器
-      # 注意：现在所有命令都以 `lxc` 执行，并且不需要 sudo
-      - name: Check, Restore or Create Container
+      # 步骤 4：检查并恢复/创建容器 (使用默认桥接网络)
+      - name: Check, Restore or Create Container with Default Networking
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
             echo "Backup found. Downloading and restoring..."
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
-            # lxd import 会创建一个已停止的容器
-            lxd import ${BACKUP_FILE}
-            # 'import' 命令默认使用备份文件中的原始容器名，我们需要启动它
-            # 为了简单起见，这里假设备份的容器名和我们要用的 CONTAINER_NAME 一致
-            # 如果不一致，恢复后需要手动 lxc rename
-            lxc start ${CONTAINER_NAME}
+            sudo incus import ${BACKUP_FILE} ${CONTAINER_NAME}
+            sudo incus start ${CONTAINER_NAME}
           else
-            echo "No backup found. Launching new container..."
-            # `lxc launch` 默认使用官方配置好的网络，直接就能联网
-            lxc launch ubuntu:22.04 ${CONTAINER_NAME}
+            echo "No backup found. Launching new container with default networking..."
+            sudo incus launch images:ubuntu/22.04 ${CONTAINER_NAME}
           fi
           
-          echo "Waiting for container to settle..."
-          sleep 10
+          # 等待网络就绪
+          echo "Waiting for container to be ready..."
+          sleep 5
           
           echo "Verifying container internet access..."
-          lxc exec ${CONTAINER_NAME} -- apt-get update
+          # 在容器内执行 apt-get update 作为验证
+          sudo incus exec ${CONTAINER_NAME} -- apt-get update
 
       # 步骤 5：启用 Upterm 调试会话
       - name: Enable Upterm debugging
@@ -71,15 +82,13 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: 348
 
-      # --- SSH 会话结束后，工作流从这里继续 ---
-
       # 步骤 6：停止并备份容器
       - name: Stop and Backup Container
         run: |
           echo "Stopping container..."
-          lxc stop ${CONTAINER_NAME} --force
+          sudo incus stop ${CONTAINER_NAME} --force
           echo "Exporting container..."
-          lxc export ${CONTAINER_NAME} ${BACKUP_FILE} --force
+          sudo incus export ${CONTAINER_NAME} ${BACKUP_FILE} --force
           echo "Uploading new backup to WebDAV..."
           rclone copyto ${BACKUP_FILE} ${WEBDAV_REMOTE}:${BACKUP_FILE}
           echo "Backup complete."
