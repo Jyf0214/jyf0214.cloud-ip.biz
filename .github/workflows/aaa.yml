@@ -1,5 +1,5 @@
 # 工作流名称
-name: Incus CI with SSH and WebDAV Backup (Official Action)
+name: Incus CI with SSH and WebDAV Backup (Official Action - Correct Version)
 
 # 触发条件
 on:
@@ -8,7 +8,7 @@ on:
 # 环境变量
 env:
   CONTAINER_NAME: my-ci-container
-  BACKUP_FILE: lxd_backup.tar.gz # LXD 默认可能使用 .tar.gz
+  BACKUP_FILE: lxd_backup.tar.gz
   WEBDAV_REMOTE: webdav_backup
 
 jobs:
@@ -17,9 +17,9 @@ jobs:
 
     steps:
       # 步骤 1：使用官方 Action 安装并配置好一个网络通畅的 LXD
-      # 这是最关键的一步，它解决了我们之前遇到的所有网络问题。
+      # 这是最关键的一步，使用了正确的 @v1 版本标签。
       - name: Setup LXD with proper networking
-        uses: canonical/setup-lxd@v1.1.0 # 推荐固定版本以保证稳定性
+        uses: canonical/setup-lxd@v1
 
       # 步骤 2：安装 rclone
       - name: Install rclone
@@ -40,7 +40,7 @@ jobs:
           " > ~/.config/rclone/rclone.conf
 
       # 步骤 4：检查并恢复/创建容器
-      # 注意：现在所有 lxc 命令都需要以 `lxc` 而不是 `incus` 执行
+      # 注意：现在所有命令都以 `lxc` 执行，并且不需要 sudo
       - name: Check, Restore or Create Container
         run: |
           if [ -n "$(rclone lsf ${WEBDAV_REMOTE}:/ --include ${BACKUP_FILE})" ]; then
@@ -48,12 +48,10 @@ jobs:
             rclone copy ${WEBDAV_REMOTE}:${BACKUP_FILE} .
             # lxd import 会创建一个已停止的容器
             lxd import ${BACKUP_FILE}
-            # 'import' 命令默认使用备份文件中的原始容器名
-            # 为了保险起见，我们先获取原始名称再启动
-            ORIGINAL_NAME=$(tar -xOf ${BACKUP_FILE} backup/index.yaml | grep 'name:' | awk '{print $2}')
-            lxc start ${ORIGINAL_NAME}
-            # 如果需要，可以重命名为标准名称
-            lxc rename ${ORIGINAL_NAME} ${CONTAINER_NAME}
+            # 'import' 命令默认使用备份文件中的原始容器名，我们需要启动它
+            # 为了简单起见，这里假设备份的容器名和我们要用的 CONTAINER_NAME 一致
+            # 如果不一致，恢复后需要手动 lxc rename
+            lxc start ${CONTAINER_NAME}
           else
             echo "No backup found. Launching new container..."
             # `lxc launch` 默认使用官方配置好的网络，直接就能联网
@@ -64,7 +62,6 @@ jobs:
           sleep 10
           
           echo "Verifying container internet access..."
-          # `lxc exec` 同样不需要 sudo
           lxc exec ${CONTAINER_NAME} -- apt-get update
 
       # 步骤 5：启用 Upterm 调试会话
