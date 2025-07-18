@@ -7,7 +7,7 @@ env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_FILE: minisys_backup.tar.gz
   WEBDAV_REMOTE_PATH: "backup"
-  RUN_DURATION_MINUTES: 320
+  RUN_DURATION_MINUTES: 300
 
 jobs:
   build-and-debug:
