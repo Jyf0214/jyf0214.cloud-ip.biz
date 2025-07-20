@@ -51,8 +51,10 @@ jobs:
 
       - name: 2. 安装所需依赖 (Install dependencies)
         run: |
+          echo "正在安装 debootstrap, rclone 和 pigz (用于多线程压缩)..."
           sudo apt-get update
-          sudo apt-get install -y debootstrap rclone
+          sudo apt-get install -y debootstrap rclone pigz
+          echo "✅ 依赖安装完毕。"
 
       - name: 3. 恢复备份或创建新系统 (Restore backup or create new system)
         id: restore_or_create
@@ -67,8 +69,8 @@ jobs:
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
             
             if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null; then
-              echo "✅ 发现备份。正在从云端流式恢复系统..."
-              rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | sudo tar -xzpf - -C ${{ env.CHROOT_DIR }}
+              echo "✅ 发现备份。正在使用 pigz 多线程流式恢复系统..."
+              rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
               echo "restored=true" >> $GITHUB_OUTPUT
             else
               echo "⚠️ 未发现云端备份。将自动转为创建新系统..."
@@ -91,7 +93,20 @@ jobs:
           sudo mount -o bind /sys "${MNT_DIR}/sys"
           echo "✅ 虚拟文件系统已挂载。"
 
-      - name: 5A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
+      - name: 5. 清理 Chroot 环境空间 (Clean chroot environment)
+        run: |
+          echo "🧹 开始清理 chroot 环境内的缓存和临时文件..."
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
+            echo '  -> 正在清理 apt 缓存...'; \
+            apt-get clean -y > /dev/null 2>&1; \
+            rm -rf /var/lib/apt/lists/*; \
+            echo '  -> 正在清理临时文件...'; \
+            rm -rf /tmp/* /var/tmp/*; \
+            echo '  -> 正在清理 /root 目录下的缓存...'; \
+            rm -rf /root/.cache; \
+            echo '✅ Chroot 环境清理完成。'"
+
+      - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
         run: |
           echo "✅ 进入自动化运行模式..."
@@ -185,7 +200,7 @@ jobs:
           sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
           echo "⏳ 规定运行时间已到。"
 
-      - name: 5B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
+      - name: 6B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
         # 仅在用户选择启用 SSH 时运行
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
@@ -193,7 +208,7 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: 100
 
-      - name: 6. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
+      - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
         # 无论之前的步骤是否成功，都执行此步骤
         if: always()
         run: |
@@ -205,7 +220,7 @@ jobs:
           sudo umount -l "${MNT_DIR}/sys" || true
           echo "✅ 虚拟文件系统已全部卸载。"
 
-      - name: 7. 备份系统环境到 WebDAV (Backup environment to WebDAV)
+      - name: 8. 备份系统环境到 WebDAV (Backup environment to WebDAV)
         # 仅在工作流未被取消时执行
         if: ${{ !cancelled() }}
         env:
@@ -213,10 +228,10 @@ jobs:
           WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "开始流式打包并上传备份..."
+          echo "开始使用 pigz 多线程流式打包并上传备份..."
           # 停止 chroot 环境中的所有 pm2 服务
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
           rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-          sudo tar -czpf - -C ${{ env.CHROOT_DIR }} . | rclone rcat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} --progress
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} --progress
           echo "✅ 备份流程执行完毕。"
