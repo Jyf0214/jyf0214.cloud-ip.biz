@@ -1,5 +1,7 @@
+# 工作流名称
 name: CI with Persistent Chroot Environment (Enhanced)
 
+# 工作流触发器：手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +21,7 @@ on:
         type: boolean
         default: false
 
+# 全局环境变量
 env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_FILE: minisys_backup.tar.gz
@@ -29,9 +32,13 @@ env:
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
 
+# 作业定义
 jobs:
   build-and-debug:
+    # 运行环境
     runs-on: ubuntu-latest
+    
+    # 作业步骤
     steps:
       - name: 1. 最大化运行器磁盘空间 (Maximize runner disk space)
         run: |
@@ -145,7 +152,6 @@ jobs:
               echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
           fi
 
-          # 新增: 6. 启动 openlist server
           echo "6. 正在尝试启动 openlist server..."
           OPENLIST_APP="\${HOME_DIR}/openlist"
           if [ -f "\${OPENLIST_APP}" ]; then
@@ -156,7 +162,6 @@ jobs:
               echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
           fi
 
-          # 新增: 7. 启动 ChmlFrp
           echo "7. 正在尝试启动 ChmlFrp 服务..."
           FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
           if [ -f "\${FRPC_APP}" ]; then
@@ -170,7 +175,7 @@ jobs:
           echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
           pm2 save
           pm2 ls
-EOF
+          EOF
 
           echo "赋予启动脚本执行权限并执行..."
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
@@ -181,6 +186,7 @@ EOF
           echo "⏳ 规定运行时间已到。"
 
       - name: 5B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
+        # 仅在用户选择启用 SSH 时运行
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with:
@@ -188,6 +194,7 @@ EOF
           wait-timeout-minutes: 100
 
       - name: 6. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
+        # 无论之前的步骤是否成功，都执行此步骤
         if: always()
         run: |
           echo "会话结束。为安全备份，正在卸载所有虚拟文件系统..."
@@ -199,6 +206,7 @@ EOF
           echo "✅ 虚拟文件系统已全部卸载。"
 
       - name: 7. 备份系统环境到 WebDAV (Backup environment to WebDAV)
+        # 仅在工作流未被取消时执行
         if: ${{ !cancelled() }}
         env:
           WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
@@ -206,6 +214,7 @@ EOF
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
           echo "开始流式打包并上传备份..."
+          # 停止 chroot 环境中的所有 pm2 服务
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
           rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
