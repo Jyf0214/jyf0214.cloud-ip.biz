@@ -34,6 +34,8 @@ jobs:
           echo "正在安装 rclone 和 pigz (用于多线程压缩)..."
           sudo apt-get update
           sudo apt-get install -y rclone pigz
+          pip install --upgrade pip
+          pip install requests tqdm py7zr webdavclient3 rarfile
           echo "✅ 依赖安装完毕。"
 
       - name: 3. [强制] 从云端恢复系统 (Mandatory Restore from Cloud)
