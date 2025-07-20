@@ -1,77 +1,110 @@
-name: CI with Persistent Chroot Environment (Enhanced)
+# 工作流名称
+name: Run OpenList and Veiled Journeys Downloader
 
 # 工作流触发器：手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
-    inputs:
-      use_cache:
-        description: '是否启用恢复缓存 (Restore from backup?)'
-        required: true
-        type: boolean
-        default: true
-      run_startup_script:
-        description: '是否自动执行启动脚本 (Auto-run startup script?)'
-        required: true
-        type: boolean
-        default: true
-      enable_ssh:
-        description: '是否启用SSH手动调试 (Enable SSH for manual debug?)'
-        required: true
-        type: boolean
-        default: false
 
 # 全局环境变量
 env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_FILE: minisys_backup.tar.gz
   WEBDAV_REMOTE_PATH: "backup"
-  RUN_DURATION_MINUTES: 342
+  PAT: ${{ secrets.PAT }} 
+
+# 作业定义
 jobs:
-  openlist-kemono:
+  build-and-run:
+    # 运行环境
     runs-on: ubuntu-latest
-
+    
+    # 作业步骤
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Prepare TERM env
-        run: echo "TERM=xterm-256color" >> $GITHUB_ENV
-
-      - name: Install OpenList
+      - name: 1. 最大化运行器磁盘空间 (Maximize runner disk space)
         run: |
-          pip install webdavclient3
+          echo "清理前，初始磁盘空间："
+          df -h /
+          echo "开始清理预装软件以释放空间..."
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          echo "✅ 清理完成，当前可用空间："
+          df -h /
 
-      - name: Clone private repository (veiled-journeys)
+      - name: 2. 安装所需依赖 (Install dependencies)
+        run: |
+          echo "正在安装 rclone 和 pigz (用于多线程压缩)..."
+          sudo apt-get update
+          sudo apt-get install -y rclone pigz
+          echo "✅ 依赖安装完毕。"
+
+      - name: 3. [强制] 从云端恢复系统 (Mandatory Restore from Cloud)
         env:
-          PAT: ${{ secrets.PAT }} # 保持 PAT 秘密在此处可用
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
-          echo "Cloning private repository veiled-journeys..."
-          git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
+          sudo mkdir -p ${{ env.CHROOT_DIR }}
+          echo "🔎 正在配置 rclone 并检查备份..."
+          rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
+          
+          if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null; then
+            echo "✅ 发现备份。正在使用 pigz 多线程流式恢复系统..."
+            rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+          else
+            echo "❌ 错误：未在云端发现指定的备份文件 (${BACKUP_FILE})。此工作流需要一个预先存在的备份才能运行。"
+            exit 1
+          fi
 
-
-      - name: Install Python dependencies
+      - name: 4. 挂载虚拟文件系统到 Chroot 环境 (Mount virtual filesystems)
         run: |
-          echo "Installing Python dependencies..."
-          pip install --upgrade pip
-          pip install requests tqdm py7zr webdavclient3 rarfile
+          echo "正在挂载虚拟文件系统..."
+          MNT_DIR=${{ env.CHROOT_DIR }}
+          sudo mount -t proc proc "${MNT_DIR}/proc"
+          sudo mount -o bind /dev "${MNT_DIR}/dev"
+          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
+          sudo mount -o bind /sys "${MNT_DIR}/sys"
+          echo "✅ 虚拟文件系统已挂载。"
 
-      - name: Install megadl CLI tool
+      - name: 5. 启动 OpenList 服务 (Start OpenList Service)
         run: |
-          echo "Installing megatools (includes megadl)..."
-          sudo apt update
-          sudo apt install megatools -y
-          echo "Verifying megadl installation..."
-          megadl --version
+          echo "✅ 进入自动化运行模式，准备启动 OpenList..."
+          
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
+          #!/bin/bash
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
+          HOME_DIR="/root"
 
-      - name: Run Kemono Downloader
-        env:
-          OPENLIST_PASSWORD: ${{ secrets.OPENLIST_PASSWORD }}
+          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
+          
+          if ! command -v pm2 &> /dev/null; then
+              echo "  -> PM2 未安装，将使用 npm 全局安装..."
+              npm install -g pm2
+          fi
+          
+          echo "1. 正在尝试启动 openlist server..."
+          OPENLIST_APP="\${HOME_DIR}/openlist"
+          if [ -f "\${OPENLIST_APP}" ]; then
+              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
+              cd "\${HOME_DIR}"
+              pm2 start ./openlist --name "openlist-server" -- server
+          else
+              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
+          fi
+          
+          echo "--- [Chroot 环境内] 启动任务已派发 ---"
+          pm2 save
+          pm2 ls
+          EOF
+
+          echo "赋予启动脚本执行权限并执行..."
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
+          echo "🚀 OpenList 服务已启动。"
+      
+      - name: 6. 克隆下载器仓库 (Clone Downloader Repository)
+        run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
+
+      - name: 7. 运行 Kemono 下载器 (Run Kemono Downloader)
         run: |
-          echo "Running Kemono Downloader..."
+          echo "正在运行 Kemono 下载器..."
           python veiled-journeys/kemono_downloader.py
-          echo "Kemono Downloader finished."
+          echo "✅ Kemono 下载器执行完毕。"
