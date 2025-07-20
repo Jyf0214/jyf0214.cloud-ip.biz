@@ -1,0 +1,54 @@
+name: Run OpenList + Kemono Downloader (Manual Access Window & Data Persistence)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  openlist-kemono:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Prepare TERM env
+        run: echo "TERM=xterm-256color" >> $GITHUB_ENV
+
+      - name: Install OpenList
+        run: |
+          pip install webdavclient3
+
+      - name: Clone private repository (veiled-journeys)
+        env:
+          PAT: ${{ secrets.PAT }} # 保持 PAT 秘密在此处可用
+        run: |
+          echo "Cloning private repository veiled-journeys..."
+          git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
+
+
+      - name: Install Python dependencies
+        run: |
+          echo "Installing Python dependencies..."
+          pip install --upgrade pip
+          pip install requests tqdm py7zr webdavclient3 rarfile
+
+      - name: Install megadl CLI tool
+        run: |
+          echo "Installing megatools (includes megadl)..."
+          sudo apt update
+          sudo apt install megatools -y
+          echo "Verifying megadl installation..."
+          megadl --version
+
+      - name: Run Kemono Downloader
+        env:
+          OPENLIST_PASSWORD: ${{ secrets.OPENLIST_PASSWORD }}
+        run: |
+          echo "Running Kemono Downloader..."
+          python veiled-journeys/kemono_downloader.py
+          echo "Kemono Downloader finished."
