@@ -10,7 +10,7 @@ env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_FILE: minisys_backup.tar.gz
   WEBDAV_REMOTE_PATH: "backup"
-  PAT: ${{ secrets.PAT }} 
+  PAT: ${{ secrets.YUNZAIBOT_PAT }} 
 
 # 作业定义
 jobs:
