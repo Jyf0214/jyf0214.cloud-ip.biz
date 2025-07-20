@@ -24,6 +24,10 @@ env:
   BACKUP_FILE: minisys_backup.tar.gz
   WEBDAV_REMOTE_PATH: "backup"
   RUN_DURATION_MINUTES: 300
+  LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
+  LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
+  LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
+  LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
 
 jobs:
   build-and-debug:
@@ -51,7 +55,6 @@ jobs:
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
           sudo mkdir -p ${{ env.CHROOT_DIR }}
-          # 根据工作流输入决定是恢复缓存还是全新安装
           if [[ "${{ github.event.inputs.use_cache }}" == "true" ]]; then
             echo "🔎 用户选择启用缓存。正在配置 rclone 并检查备份..."
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
@@ -81,68 +84,93 @@ jobs:
           sudo mount -o bind /sys "${MNT_DIR}/sys"
           echo "✅ 虚拟文件系统已挂载。"
 
-      # --- 自动化运行路径 ---
       - name: 5A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
-        # 仅在恢复了备份且用户选择运行脚本时执行
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
         run: |
           echo "✅ 进入自动化运行模式..."
           
-          # 核心修正：创建脚本，使用PM2统一管理并增加自动清理功能
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<'EOF'
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
           #!/bin/bash
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
 
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
           
-          # 0. 检查并安装PM2 (如果不存在)
           if ! command -v pm2 &> /dev/null; then
               echo "  -> PM2 未安装，将使用 npm 全局安装..."
               npm install -g pm2
           fi
           
-          # 1. 清理旧日志
           echo "1. 正在清理旧的日志文件..."
-          pm2 flush # 清空PM2管理的日志
-          find ${HOME_DIR} -name "*.log" -type f -delete # 删除主目录下所有.log文件
+          pm2 flush
+          find \${HOME_DIR} -name "*.log" -type f -delete
           echo "  -> 日志已清理。"
 
-          # 2. 启动 launcher.sh (使用PM2)
           echo "2. 正在尝试使用 PM2 启动 launcher.sh..."
-          if [ -f "${HOME_DIR}/launcher.sh" ]; then
-              echo "  -> 找到 ${HOME_DIR}/launcher.sh，正在启动..."
-              cd "${HOME_DIR}"
+          if [ -f "\${HOME_DIR}/launcher.sh" ]; then
+              cd "\${HOME_DIR}"
               pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"
           else
-              echo "  -> 警告: ${HOME_DIR}/launcher.sh 未找到，跳过。"
+              echo "  -> 警告: \${HOME_DIR}/launcher.sh 未找到，跳过。"
           fi
           
-          # 3. 启动 Redis
           echo "3. 正在启动 Redis 服务器..."
           if command -v redis-server &> /dev/null; then
               redis-server --daemonize yes
-              echo "  -> Redis 已启动。"
           else
               echo "  -> 警告: redis-server 命令未找到，跳过。"
           fi
           
-          # 4. 启动 Yunzai (使用 PM2)
           echo "4. 正在尝试启动 Yunzai-Bot..."
-          YUNZAI_DIR="${HOME_DIR}/Yunzai"
-          if [ -d "${YUNZAI_DIR}" ]; then
-              echo "  -> 找到目录 ${YUNZAI_DIR}，正在使用 PM2 启动..."
-              cd "${YUNZAI_DIR}"
+          YUNZAI_DIR="\${HOME_DIR}/Yunzai"
+          if [ -d "\${YUNZAI_DIR}" ]; then
+              cd "\${YUNZAI_DIR}"
               pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"
           else
-              echo "  -> 警告: 目录 ${YUNZAI_DIR} 未找到，跳过。"
+              echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
+          fi
+
+          echo "5. 正在尝试启动 loophole 服务..."
+          LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
+          if [ -f "\${LOOPHOLE_APP}" ]; then
+              cd "\${HOME_DIR}/loophole"
+              # 启动 loophole webdav
+              pm2 start ./loophole --name "loophole-webdav" -- \
+                webdav ~ -u "${{ env.LOOPHOLE_WEBDAV_USER }}" -p "${{ env.LOOPHOLE_WEBDAV_PASS }}" --hostname "${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}"
+              
+              # 启动 loophole http
+              pm2 start ./loophole --name "loophole-http" -- \
+                http 6099 --hostname "${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}"
+          else
+              echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
+          fi
+
+          # 新增: 6. 启动 openlist server
+          echo "6. 正在尝试启动 openlist server..."
+          OPENLIST_APP="\${HOME_DIR}/openlist"
+          if [ -f "\${OPENLIST_APP}" ]; then
+              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
+              cd "\${HOME_DIR}"
+              pm2 start ./openlist --name "openlist-server" -- server
+          else
+              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
+          fi
+
+          # 新增: 7. 启动 ChmlFrp
+          echo "7. 正在尝试启动 ChmlFrp 服务..."
+          FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
+          if [ -f "\${FRPC_APP}" ]; then
+              echo "  -> 找到 \${FRPC_APP}，正在启动服务..."
+              cd "\${HOME_DIR}/ChmlFrp"
+              pm2 start ./frpc --name "chml-frp" -- -c frpc.ini
+          else
+              echo "  -> 警告: \${FRPC_APP} 未找到，跳过。"
           fi
           
           echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
           pm2 save
-          # 在日志中显示PM2状态以供核对
           pm2 ls
-          EOF
+EOF
 
           echo "赋予启动脚本执行权限并执行..."
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
@@ -152,16 +180,13 @@ jobs:
           sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
           echo "⏳ 规定运行时间已到。"
 
-      # --- 手动配置路径 ---
       - name: 5B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
-        # 仅在用户明确选择启用SSH时执行
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 100
 
-      # --- 公共收尾步骤 ---
       - name: 6. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
         if: always()
         run: |
@@ -181,7 +206,6 @@ jobs:
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
           echo "开始流式打包并上传备份..."
-          # 优雅停止由PM2管理的服务
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
           rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
