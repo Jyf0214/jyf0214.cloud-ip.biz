@@ -79,35 +79,6 @@ jobs:
       - name: Install base tools (curl, gpg, git)
         run: sudo apt-get update && sudo apt-get install -y curl gpg git
 
-      # 步骤8：为 cloudflared 创建密钥环目录
-      - name: Create keyrings directory
-        run: sudo mkdir -p --mode=0755 /usr/share/keyrings
-
-      # 步骤9：下载 Cloudflare GPG 密钥
-      - name: Download Cloudflare GPG key
-        run: curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloudflare-main.gpg
-
-      # 步骤10：添加 Cloudflare APT 仓库
-      - name: Add Cloudflare APT repository
-        run: echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
-
-      # 步骤11：更新包列表并安装 cloudflared
-      - name: Update package list and install cloudflared
-        run: sudo apt-get update && sudo apt-get install -y cloudflared
-
-      # 步骤12：验证 cloudflared 安装
-      - name: Verify cloudflared installation
-        run: cloudflared --version
-
-      # 步骤13：启用 Upterm 调试会话
-      - name: Enable Upterm debugging
-        uses: lhotari/action-upterm@v1
-        with:
-          limit-access-to-actor: true
-          # 设置 SSH 会话的最大持续时间为 348 分钟。
-          # 达到此时间后，Upterm 会话将自动结束，工作流将继续执行后续步骤。
-          # 如果在超时前手动断开 SSH 连接，工作流也会立即继续。
-          wait-timeout-minutes: 348
 
   # Lint 和测试任务
   lint-and-test:
