@@ -1,8 +1,31 @@
-name: Run OpenList + Kemono Downloader (Manual Access Window & Data Persistence)
+name: CI with Persistent Chroot Environment (Enhanced)
 
+# 工作流触发器：手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
+    inputs:
+      use_cache:
+        description: '是否启用恢复缓存 (Restore from backup?)'
+        required: true
+        type: boolean
+        default: true
+      run_startup_script:
+        description: '是否自动执行启动脚本 (Auto-run startup script?)'
+        required: true
+        type: boolean
+        default: true
+      enable_ssh:
+        description: '是否启用SSH手动调试 (Enable SSH for manual debug?)'
+        required: true
+        type: boolean
+        default: false
 
+# 全局环境变量
+env:
+  CHROOT_DIR: /mnt/minisys
+  BACKUP_FILE: minisys_backup.tar.gz
+  WEBDAV_REMOTE_PATH: "backup"
+  RUN_DURATION_MINUTES: 342
 jobs:
   openlist-kemono:
     runs-on: ubuntu-latest
