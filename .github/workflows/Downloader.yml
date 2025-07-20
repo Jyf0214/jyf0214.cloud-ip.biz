@@ -38,74 +38,10 @@ jobs:
           pip install requests tqdm py7zr webdavclient3 rarfile
           echo "✅ 依赖安装完毕。"
 
-      - name: 3. [强制] 从云端恢复系统 (Mandatory Restore from Cloud)
-        env:
-          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-        run: |
-          sudo mkdir -p ${{ env.CHROOT_DIR }}
-          echo "🔎 正在配置 rclone 并检查备份..."
-          rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-          
-          if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null; then
-            echo "✅ 发现备份。正在使用 pigz 多线程流式恢复系统..."
-            rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-          else
-            echo "❌ 错误：未在云端发现指定的备份文件 (${BACKUP_FILE})。此工作流需要一个预先存在的备份才能运行。"
-            exit 1
-          fi
-
-      - name: 4. 挂载虚拟文件系统到 Chroot 环境 (Mount virtual filesystems)
-        run: |
-          echo "正在挂载虚拟文件系统..."
-          MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo mount -t proc proc "${MNT_DIR}/proc"
-          sudo mount -o bind /dev "${MNT_DIR}/dev"
-          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
-          sudo mount -o bind /sys "${MNT_DIR}/sys"
-          echo "✅ 虚拟文件系统已挂载。"
-
-      - name: 5. 启动 OpenList 服务 (Start OpenList Service)
-        run: |
-          echo "✅ 进入自动化运行模式，准备启动 OpenList..."
-          
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
-          #!/bin/bash
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
-          HOME_DIR="/root"
-
-          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          
-          if ! command -v pm2 &> /dev/null; then
-              echo "  -> PM2 未安装，将使用 npm 全局安装..."
-              npm install -g pm2
-          fi
-          
-          echo "1. 正在尝试启动 openlist server..."
-          OPENLIST_APP="\${HOME_DIR}/openlist"
-          if [ -f "\${OPENLIST_APP}" ]; then
-              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
-              cd "\${HOME_DIR}"
-              pm2 start ./openlist --name "openlist-server" -- server
-          else
-              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
-          fi
-          
-          echo "--- [Chroot 环境内] 启动任务已派发 ---"
-          pm2 save
-          pm2 ls
-          EOF
-
-          echo "赋予启动脚本执行权限并执行..."
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-          echo "🚀 OpenList 服务已启动。"
-      
-      - name: 6. 克隆下载器仓库 (Clone Downloader Repository)
+      - name: 3. 克隆下载器仓库 (Clone Downloader Repository)
         run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
 
-      - name: 7. 运行 Kemono 下载器 (Run Kemono Downloader)
+      - name: 4. 运行 Kemono 下载器 (Run Kemono Downloader)
         run: |
           echo "正在运行 Kemono 下载器..."
           python veiled-journeys/oplist-kemono_downloader.py
