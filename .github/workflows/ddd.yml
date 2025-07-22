@@ -1,6 +1,9 @@
+# 工作流名称
 name: CI with Persistent Environment
 
+# 工作流触发器
 on:
+  # 1. 手动触发 (workflow_dispatch)，可以自定义参数
   workflow_dispatch:
     inputs:
       use_cache:
@@ -23,19 +26,25 @@ on:
         required: true
         type: boolean
         default: false
+  # 2. 定时触发 (schedule)，每隔约6小时自动运行
   schedule:
-    - cron: '30 */6 * * *'
+    - cron: '30 */6 * * *'  # 表示每天 00:30, 06:30, 12:30, 18:30 (UTC) 触发
 
+# 并发控制：确保同一时间只有一个工作流实例运行，后续触发的会排队等待
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+# 全局环境变量
 env:
+  # 核心配置
   CHROOT_DIR: /mnt/minisys
   BACKUP_FILE: minisys_backup.tar.gz
   WEBDAV_REMOTE_PATH: "backup"
   RUN_DURATION_MINUTES: 300
+  # Rclone 性能优化参数
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
+  # Secrets
   PAT: ${{ secrets.PAT }}
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
@@ -45,15 +54,16 @@ env:
   WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
   WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
 
+# 作业定义 (单一作业)
 jobs:
   build-and-run-all:
     name: "Run All Services (Chroot + Python App)"
     runs-on: ubuntu-latest
     steps:
-      - name: "1. 检出代码 (Checkout)"
+      - name: 1. 检出代码 (Checkout)
         uses: actions/checkout@v4
 
-      - name: "2. 最大化运行器磁盘空间"
+      - name: 2. 最大化运行器磁盘空间
         run: |
           echo "清理前，初始磁盘空间："
           df -h /
@@ -61,14 +71,14 @@ jobs:
           echo "✅ 清理完成，当前可用空间："
           df -h /
 
-      - name: "3. 安装全部所需依赖"
+      - name: 3. 安装全部所需依赖
         run: |
           echo "正在安装 debootstrap, rclone, pigz..."
           sudo apt-get update
           sudo apt-get install -y debootstrap rclone pigz
           echo "✅ Chroot 相关依赖安装完毕。"
 
-      - name: "4. 设置 Python 和 Node.js 环境"
+      - name: 4. 设置 Python 和 Node.js 环境
         uses: actions/setup-node@v3
         with:
           node-version: '18'
@@ -76,143 +86,131 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: "5. ⚡️ 并行执行：恢复 Chroot (背景) & 部署 Python 应用 (前景)"
+      - name: 5. ⚡️ 并行执行：恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         run: |
           (
             echo "--- [后台任务] 开始执行 Chroot 恢复/创建 ---"
-            sudo mkdir -p "$CHROOT_DIR"
-            rclone config create webdav webdav url="$WEBDAV_URL" vendor=other user="$WEBDAV_USER" pass="$WEBDAV_PASS"
-            if [[ "${{ inputs.use_cache || 'true' }}" == "true" ]] && rclone lsf webdav:$WEBDAV_REMOTE_PATH/$BACKUP_FILE > /dev/null 2>&1; then
+            sudo mkdir -p "${{ env.CHROOT_DIR }}"
+            rclone config create webdav webdav url="${{ env.WEBDAV_URL }}" vendor=other user="${{ env.WEBDAV_USER }}" pass="${{ env.WEBDAV_PASS }}"
+            if [[ "${{ github.event.inputs.use_cache || 'true' }}" == "true" ]] && rclone lsf webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.BACKUP_FILE }} > /dev/null 2>&1; then
               echo "--- [后台任务] ✅ 发现备份，开始多线程恢复..."
-              rclone cat webdav:$WEBDAV_REMOTE_PATH/$BACKUP_FILE $RCLONE_FLAGS | pigz -dc | sudo tar -xpf - -C "$CHROOT_DIR"
+              rclone cat webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.BACKUP_FILE }} ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C "${{ env.CHROOT_DIR }}"
               echo "--- [后台任务] ✅ Chroot 环境恢复完成。---"
             else
               echo "--- [后台任务] ⚠️ 未发现备份或禁用缓存，创建全新系统中..."
-              sudo debootstrap --variant=minbase jammy "$CHROOT_DIR" http://archive.ubuntu.com/ubuntu/
+              sudo debootstrap --variant=minbase jammy "${{ env.CHROOT_DIR }}" http://archive.ubuntu.com/ubuntu/
               echo "--- [后台任务] ✅ 全新 Chroot 环境创建完成。---"
             fi
           ) &
           CHROOT_SETUP_PID=$!
           echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
           echo "1. 全局安装 pm2..."; npm install -g pm2
-          echo "2. 克隆私有仓库..."; git clone "https://x-access-token:$PAT@github.com/Jyf0214/chatgpt-on-wechat.git" || true
+          echo "2. 克隆私有仓库..."; git clone "https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/chatgpt-on-wechat.git" || true
           echo "3. 安装 Python 依赖项..."; cd chatgpt-on-wechat; python -m pip install --upgrade pip; pip install -r requirements*.txt --target ./ > /dev/null 2>&1 || true; cd ..
           echo "4. 使用 PM2 启动 Python 应用..."; cd chatgpt-on-wechat; pm2 start "python3 app.py" --name "python-app"; cd ..
           echo "--- [前台任务] ✅ Python 应用已启动。等待后台 Chroot 任务完成... ---"
           wait $CHROOT_SETUP_PID
           echo "--- ✅ 所有并行任务完成 ---"
-          if [[ -f "$CHROOT_DIR/etc/debian_version" ]]; then
-            echo "restored=true" >> $GITHUB_OUTPUT
-          else
-            echo "restored=false" >> $GITHUB_OUTPUT
-          fi
+          if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> "$GITHUB_OUTPUT"; else echo "restored=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: "6. 挂载虚拟文件系统到 Chroot 环境"
+      - name: 6. 挂载虚拟文件系统到 Chroot 环境
         run: |
           echo "正在挂载虚拟文件系统..."
-          MNT_DIR="$CHROOT_DIR"
+          MNT_DIR="${{ env.CHROOT_DIR }}"
           sudo mount -t proc proc "${MNT_DIR}/proc"
           sudo mount -o bind /dev "${MNT_DIR}/dev"
           sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
           sudo mount -o bind /sys "${MNT_DIR}/sys"
           echo "✅ 虚拟文件系统已挂载。"
 
-      - name: "7. 清理 Chroot 环境空间"
-        if: ${{ steps.restore_or_create.outputs.restored == 'true' }}
+      - name: 7. 清理 Chroot 环境空间
+        if: steps.restore_or_create.outputs.restored == 'true'
         run: |
           echo "🧹 开始清理 chroot 环境内的缓存和临时文件..."
-          sudo chroot "$CHROOT_DIR" /bin/bash -c "apt-get clean -y > /dev/null 2>&1; rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache"
+          sudo chroot "${{ env.CHROOT_DIR }}" /bin/bash -c "apt-get clean -y > /dev/null 2>&1; rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache"
           echo "✅ Chroot 环境清理完成。"
 
-      - name: "8A. [自动化路径] 启动 Chroot 内的服务"
-        if: ${{ steps.restore_or_create.outputs.restored == 'true' && (inputs.run_startup_script == true || inputs.run_startup_script == 'true') }}
+      - name: 8A. [自动化路径] 启动 Chroot 内的服务
+        if: steps.restore_or_create.outputs.restored == 'true' && (github.event.inputs.run_startup_script || 'true') == 'true'
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
+          sudo tee "${{ env.CHROOT_DIR }}/tmp/startup.sh" > /dev/null <<'EOF'
+          #!/bin/bash
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
 
-          # 创建临时脚本路径
-          SCRIPT_PATH="$CHROOT_DIR/tmp/startup_$RANDOM.sh"
-          
-          # 使用单引号防止变量立即扩展
-          sudo tee "$SCRIPT_PATH" > /dev/null <<'EOS'
-#!/bin/bash
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
+          # 从外部注入的标志位
+          ENABLE_NAPCAT_PROXY_FLAG="PLACEHOLDER_NAPCAT_FLAG"
 
-# 从外部注入的标志位
-ENABLE_NAPCAT_PROXY_FLAG="$1"
-LOOPHOLE_WEBDAV_USER="$2"
-LOOPHOLE_WEBDAV_PASS="$3"
-LOOPHOLE_WEBDAV_HOSTNAME="$4"
-LOOPHOLE_NAPCAT_HOSTNAME="$5"
+          HOME_DIR="/root"
+          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
+          if ! command -v pm2 &> /dev/null; then echo "  -> PM2 未安装，将使用 npm 全局安装..."; npm install -g pm2; fi
+          echo "1. 清理旧日志..."; pm2 flush >/dev/null; find "${HOME_DIR}" -name "*.log" -type f -delete
 
-HOME_DIR="/root"
-echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-if ! command -v pm2 &> /dev/null; then echo "  -> PM2 未安装，将使用 npm 全局安装..."; npm install -g pm2; fi
-echo "1. 清理旧日志..."; pm2 flush >/dev/null; find "${HOME_DIR}" -name "*.log" -type f -delete
+          echo "2. 启动 launcher.sh..."; if [ -f "${HOME_DIR}/launcher.sh" ]; then cd "${HOME_DIR}"; pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"; fi
+          echo "3. 启动 Redis..."; if command -v redis-server &> /dev/null; then redis-server --daemonize yes; fi
+          echo "4. 启动 Yunzai-Bot..."; YUNZAI_DIR="${HOME_DIR}/Yunzai"; if [ -d "${YUNZAI_DIR}" ]; then cd "${YUNZAI_DIR}"; pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"; fi
 
-echo "2. 启动 launcher.sh..."; if [ -f "${HOME_DIR}/launcher.sh" ]; then cd "${HOME_DIR}"; pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"; fi
-echo "3. 启动 Redis..."; if command -v redis-server &> /dev/null; then redis-server --daemonize yes; fi
-echo "4. 启动 Yunzai-Bot..."; YUNZAI_DIR="${HOME_DIR}/Yunzai"; if [ -d "${YUNZAI_DIR}" ]; then cd "${YUNZAI_DIR}"; pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"; fi
+          echo "5. 启动 loophole 服务..."
+          LOOPHOLE_APP="${HOME_DIR}/loophole/loophole"
+          if [ -f "${LOOPHOLE_APP}" ]; then
+              cd "${HOME_DIR}/loophole"
+              echo "  -> 启动 loophole webdav..."
+              pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
 
-echo "5. 启动 loophole 服务..."
-LOOPHOLE_APP="${HOME_DIR}/loophole/loophole"
-if [ -f "${LOOPHOLE_APP}" ]; then
-    cd "${HOME_DIR}/loophole"
-    echo "  -> 启动 loophole webdav..."
-    pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
+              if [[ "$ENABLE_NAPCAT_PROXY_FLAG" == "true" ]]; then
+                  echo "  -> 启动 loophole http (Napcat 穿透)..."
+                  pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}"
+              else
+                  echo "  -> Napcat 穿透未启用，跳过。"
+              fi
+          fi
 
-    if [[ "$ENABLE_NAPCAT_PROXY_FLAG" == "true" ]]; then
-        echo "  -> 启动 loophole http (Napcat 穿透)..."
-        pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}"
-    else
-        echo "  -> Napcat 穿透未启用，跳过。"
-    fi
-fi
+          echo "6. 启动 openlist..."; OPENLIST_APP="${HOME_DIR}/openlist"; if [ -f "${OPENLIST_APP}" ]; then cd "${HOME_DIR}"; pm2 start ./openlist --name "openlist-server" -- server; fi
+          echo "7. 启动 ChmlFrp..."; FRPC_APP="${HOME_DIR}/ChmlFrp/frpc"; if [ -f "${FRPC_APP}" ]; then cd "${HOME_DIR}/ChmlFrp"; pm2 start ./frpc --name "chml-frp" -- -c frpc.ini; fi
 
-echo "6. 启动 openlist..."; OPENLIST_APP="${HOME_DIR}/openlist"; if [ -f "${OPENLIST_APP}" ]; then cd "${HOME_DIR}"; pm2 start ./openlist --name "openlist-server" -- server; fi
-echo "7. 启动 ChmlFrp..."; FRPC_APP="${HOME_DIR}/ChmlFrp/frpc"; if [ -f "${FRPC_APP}" ]; then cd "${HOME_DIR}/ChmlFrp"; pm2 start ./frpc --name "chml-frp" -- -c frpc.ini; fi
+          echo "--- [Chroot 环境内] 任务派发完毕，保存PM2进程列表 ---"; pm2 save; pm2 ls
+EOF
+          # 注入环境变量和开关标志
+          sudo sed -i "s/PLACEHOLDER_NAPCAT_FLAG/${{ github.event.inputs.enable_napcat_proxy || 'false' }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
+          sudo sed -i "s/\${LOOPHOLE_WEBDAV_USER}/${{ env.LOOPHOLE_WEBDAV_USER }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
+          sudo sed -i "s/\${LOOPHOLE_WEBDAV_PASS}/${{ env.LOOPHOLE_WEBDAV_PASS }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
+          sudo sed -i "s/\${LOOPHOLE_WEBDAV_HOSTNAME}/${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
+          sudo sed -i "s/\${LOOPHOLE_NAPCAT_HOSTNAME}/${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
 
-echo "--- [Chroot 环境内] 任务派发完毕，保存PM2进程列表 ---"; pm2 save; pm2 ls
-EOS
+          sudo chmod +x "${{ env.CHROOT_DIR }}/tmp/startup.sh"
+          sudo chroot "${{ env.CHROOT_DIR }}" /tmp/startup.sh
 
-          sudo chmod +x "$SCRIPT_PATH"
-          sudo chroot "$CHROOT_DIR" /bin/bash -c "/tmp/$(basename $SCRIPT_PATH) \
-            '${{ inputs.enable_napcat_proxy }}' \
-            '$LOOPHOLE_WEBDAV_USER' \
-            '$LOOPHOLE_WEBDAV_PASS' \
-            '$LOOPHOLE_WEBDAV_HOSTNAME' \
-            '$LOOPHOLE_NAPCAT_HOSTNAME'"
-
-          echo "🚀 所有服务已启动，工作流将在此暂停 $RUN_DURATION_MINUTES 分钟..."
-          sleep $(( RUN_DURATION_MINUTES * 60 ))
+          echo "🚀 所有服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
+          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
           echo "⏳ 规定运行时间已到。"
 
-      - name: "8B. [手动调试路径] 启用 Upterm SSH 会话"
-        if: ${{ inputs.enable_ssh == true }}
+      - name: 8B. [手动调试路径] 启用 Upterm SSH 会话
+        if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
           wait-timeout-minutes: 100
 
-      - name: "9. 卸载及停止服务"
+      - name: 9. 卸载及停止服务
         if: always()
         run: |
           echo "会话结束。正在停止所有服务并卸载虚拟文件系统..."
           pm2 stop all || true
-          sudo chroot "$CHROOT_DIR" bash -c 'command -v pm2 && pm2 stop all' || true
+          sudo chroot "${{ env.CHROOT_DIR }}" bash -c 'command -v pm2 && pm2 stop all' || true
 
-          MNT_DIR="$CHROOT_DIR"
+          MNT_DIR="${{ env.CHROOT_DIR }}"
           sudo umount -l "${MNT_DIR}/dev/pts" || true
           sudo umount -l "${MNT_DIR}/dev" || true
           sudo umount -l "${MNT_DIR}/proc" || true
           sudo umount -l "${MNT_DIR}/sys" || true
           echo "✅ 服务已停止，文件系统已卸载。"
 
-      - name: "10. ⚡️ 高效流式备份 Chroot 系统"
-        if: ${{ success() && !cancelled() && (inputs.use_cache == true || inputs.use_cache == 'true') }}
+      - name: 10. ⚡️ 高效流式备份 Chroot 系统
+        if: success() && !cancelled() && (github.event.inputs.use_cache || 'true') == 'true'
         run: |
           echo "开始多线程压缩、上传 Chroot 环境备份..."
-          rclone config create webdav webdav url="$WEBDAV_URL" vendor=other user="$WEBDAV_USER" pass="$WEBDAV_PASS"
-          echo "⚡️ Rclone 优化参数: $RCLONE_FLAGS"
-          sudo tar -cpf - -C "$CHROOT_DIR" . | pigz -c | rclone rcat "webdav:$WEBDAV_REMOTE_PATH/$BACKUP_FILE" $RCLONE_FLAGS
+          rclone config create webdav webdav url="${{ env.WEBDAV_URL }}" vendor=other user="${{ env.WEBDAV_USER }}" pass="${{ env.WEBDAV_PASS }}"
+          echo "⚡️ Rclone 优化参数: ${{ env.RCLONE_FLAGS }}"
+          sudo tar -cpf - -C "${{ env.CHROOT_DIR }}" . | pigz -c | rclone rcat "webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.BACKUP_FILE }}" ${{ env.RCLONE_FLAGS }}
           echo "✅ 备份流程执行完毕。"
