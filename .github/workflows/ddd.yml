@@ -170,7 +170,7 @@ jobs:
           echo "7. 启动 ChmlFrp..."; FRPC_APP="${HOME_DIR}/ChmlFrp/frpc"; if [ -f "${FRPC_APP}" ]; then cd "${HOME_DIR}/ChmlFrp"; pm2 start ./frpc --name "chml-frp" -- -c frpc.ini; fi
 
           echo "--- [Chroot 环境内] 任务派发完毕，保存PM2进程列表 ---"; pm2 save; pm2 ls
-EOF
+          EOF
           # 注入环境变量和开关标志
           sudo sed -i "s/PLACEHOLDER_NAPCAT_FLAG/${{ github.event.inputs.enable_napcat_proxy || 'false' }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
           sudo sed -i "s/\${LOOPHOLE_WEBDAV_USER}/${{ env.LOOPHOLE_WEBDAV_USER }}/g" "${{ env.CHROOT_DIR }}/tmp/startup.sh"
