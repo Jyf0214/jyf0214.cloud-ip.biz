@@ -223,7 +223,7 @@ jobs:
           echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
           pm2 save
           pm2 ls
-EOF
+          EOF
           
           echo "赋予启动脚本执行权限并执行..."
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
