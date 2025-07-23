@@ -69,23 +69,23 @@ jobs:
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-            
-            # --- 版本化恢复逻辑 ---
+
+            # --- [FIXED] 版本化恢复逻辑 ---
+            # 修复了路径拼接问题，确保无论是版本化备份还是旧版备份，都能构造出正确的完整远程路径
             LATEST_BACKUP_PATH=""
             echo "1. 正在查找最新的版本化备份..."
-            LATEST_BACKUP_PATH=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                                jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}"))] | sort_by(.ModTime) | .[-1].Path' 2>/dev/null)
+            LATEST_VERSIONED_FILENAME=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
+                                      jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
 
-            if [[ "$LATEST_BACKUP_PATH" == "null" || -z "$LATEST_BACKUP_PATH" ]]; then
-                echo "   -> 未找到版本化备份。"
-                LATEST_BACKUP_PATH=""
-            fi
-
-            if [[ -z "$LATEST_BACKUP_PATH" ]]; then
-              echo "2. 正在查找旧版备份 (${{ env.OLD_BACKUP_FILE }})..."
-              if rclone lsf webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }} > /dev/null 2>&1; then
-                LATEST_BACKUP_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }}"
-              fi
+            if [[ -n "$LATEST_VERSIONED_FILENAME" && "$LATEST_VERSIONED_FILENAME" != "null" ]]; then
+                echo "   -> 发现最新版本化备份: ${LATEST_VERSIONED_FILENAME}"
+                LATEST_BACKUP_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${LATEST_VERSIONED_FILENAME}"
+            else
+                echo "   -> 未找到版本化备份。正在查找旧版备份 (${{ env.OLD_BACKUP_FILE }})..."
+                if rclone lsf webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }} > /dev/null 2>&1; then
+                    echo "   -> 发现旧版备份。"
+                    LATEST_BACKUP_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }}"
+                fi
             fi
 
             if [[ -n "$LATEST_BACKUP_PATH" ]]; then
@@ -188,7 +188,7 @@ jobs:
               echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
           fi
 
-          echo "5. 正在尝试启动 loophole 服务..."
+          echo "5. 正在启动 loophole 服务..."
           LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
           if [ -f "\${LOOPHOLE_APP}" ]; then
               cd "\${HOME_DIR}/loophole"
@@ -260,12 +260,16 @@ jobs:
           echo "✅ 新备份上传成功。"
 
           echo "--- 2. 清理旧备份 (保留3个最新) ---"
+          # [FIXED] 修复了删除文件时的路径问题
+          # `jq`返回的是文件名，而不是完整路径，因此在调用 `rclone deletefile` 时需要手动拼接
           FILES_TO_DELETE=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                              jq -r '[.[] | select(.Name | test("minisys_backup.*\\\\.tar\\\\.gz"))] | sort_by(.ModTime) | .[:-3][] | .Path' 2>/dev/null)
+                              jq -r '[.[] | select(.Name | test("minisys_backup.*\\.tar\\.gz"))] | sort_by(.ModTime) | .[:-3][] | .Name' 2>/dev/null)
+          
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
             echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"
-            for file_path in $FILES_TO_DELETE; do
-              echo "Deleting: $file_path"; rclone deletefile "webdav:$file_path"
+            for file_name in $FILES_TO_DELETE; do
+              FULL_REMOTE_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${file_name}"
+              echo "Deleting: $FULL_REMOTE_PATH"; rclone deletefile "webdav:${FULL_REMOTE_PATH}"
             done
             echo "✅ 旧备份清理完毕。"
           else
