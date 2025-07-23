@@ -34,6 +34,8 @@ env:
   WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
   WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
   WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+  NAPCATUSER: ${{ secrets.NAPCATUSER }}
+  NAPCATPASS: ${{ secrets.NAPCATPASS }}
 
 jobs:
   build-and-run-all:
@@ -143,6 +145,8 @@ jobs:
           export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
           export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
           export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
+          export NAPCATUSER='${{ env.NAPCATUSER }}'
+          export NAPCATPASS='${{ env.NAPCATPASS }}'
           
           # 内部使用的变量
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
@@ -194,7 +198,7 @@ jobs:
               # 根据开关，决定是否启动 Napcat 隧道
               if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then
                   echo "  -> 用户已启用 Napcat 隧道，正在启动 loophole-http 服务...";
-                  pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "\${LOOPHOLE_NAPCAT_HOSTNAME}"
+                  pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
               else
                   echo "  -> Napcat 隧道未启用，跳过 loophole-http 服务。"
               fi
