@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Versioned Backups - Complete with Enhanced Cleanup)
+name: CI with Persistent Environment (Versioned Backups - ZSTD Accelerated)
 
 # 工作流触发器
 on:
@@ -39,7 +39,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (Versioned Backups)"
+    name: "Run All Services (ZSTD Accelerated Backups)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -49,7 +49,8 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
       - name: 3. 安装全部所需依赖
-        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz jq
+        # [OPTIMIZED] 增加了 zstd 依赖，用于更快的压缩
+        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz jq zstd
 
       - name: 4. 设置 Python 和 Node.js 环境
         uses: actions/setup-node@v3
@@ -70,12 +71,10 @@ jobs:
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
 
-            # --- [FIXED] 版本化恢复逻辑 ---
-            # 修复了路径拼接问题，确保无论是版本化备份还是旧版备份，都能构造出正确的完整远程路径
-            LATEST_BACKUP_PATH=""
+            # --- [ENHANCED] 版本化恢复逻辑 (支持 .zst 和 .gz) ---
             echo "1. 正在查找最新的版本化备份..."
             LATEST_VERSIONED_FILENAME=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                                      jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
+                                      jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}") and (.Name | test("\\.tar\\.(gz|zst)$")))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
 
             if [[ -n "$LATEST_VERSIONED_FILENAME" && "$LATEST_VERSIONED_FILENAME" != "null" ]]; then
                 echo "   -> 发现最新版本化备份: ${LATEST_VERSIONED_FILENAME}"
@@ -90,10 +89,18 @@ jobs:
 
             if [[ -n "$LATEST_BACKUP_PATH" ]]; then
               echo "--- [后台任务] ✅ 发现可用备份: ${LATEST_BACKUP_PATH}。开始下载..."
-              LOCAL_BACKUP_PATH="/tmp/backup.tar.gz"
-              rclone copyto "webdav:${LATEST_BACKUP_PATH}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-              echo "--- [后台任务] ✅ 下载完成。开始从本地文件解压..."
-              pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+              # [OPTIMIZED] 根据文件后缀选择不同的解压方式
+              if [[ "$LATEST_BACKUP_PATH" == *.tar.zst ]]; then
+                LOCAL_BACKUP_PATH="/tmp/backup.tar.zst"
+                rclone copyto "webdav:${LATEST_BACKUP_PATH}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
+                echo "--- [后台任务] ✅ 下载完成。开始使用 zstd 解压..."
+                unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+              else # 默认处理 .tar.gz
+                LOCAL_BACKUP_PATH="/tmp/backup.tar.gz"
+                rclone copyto "webdav:${LATEST_BACKUP_PATH}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
+                echo "--- [后台任务] ✅ 下载完成。开始使用 pigz 解压..."
+                pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+              fi
               rm -f ${LOCAL_BACKUP_PATH}
             else
               echo "--- [后台任务] ⚠️ 所有类型的备份均未找到。将创建全新系统..."
@@ -264,24 +271,27 @@ jobs:
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
-      - name: 10. ⚡️ 创建版本化备份并清理旧版本
+      - name: 10. ⚡️ [ZSTD 加速] 创建版本化备份并清理旧版本
         if: success() && !cancelled() && (github.event.inputs.use_cache || 'true') == 'true'
         run: |
-          echo "--- 1. 创建新的版本化备份 ---"
+          echo "--- 1. 创建新的版本化备份 (使用 zstd 高速压缩) ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
           rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
+          
+          # [OPTIMIZED] 文件名后缀改为 .tar.zst
+          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat webdav:${{ env.WEBDAV_REMOTE_PATH }}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          
+          # [OPTIMIZED] 使用 zstd 替代 pigz。-1 是速度最快的压缩等级, -T0 使用所有可用CPU核心
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | zstd -c -T0 -1 | rclone rcat webdav:${{ env.WEBDAV_REMOTE_PATH }}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
 
           echo "--- 2. 清理旧备份 (保留3个最新) ---"
-          # [FIXED] 修复了删除文件时的路径问题
-          # `jq`返回的是文件名，而不是完整路径，因此在调用 `rclone deletefile` 时需要手动拼接
+          # [OPTIMIZED] jq 过滤器现在可以识别 .gz 和 .zst 两种后缀
           FILES_TO_DELETE=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                              jq -r '[.[] | select(.Name | test("minisys_backup.*\\.tar\\.gz"))] | sort_by(.ModTime) | .[:-3][] | .Name' 2>/dev/null)
+                              jq -r '[.[] | select(.Name | test("minisys_backup.*\\.tar\\.(gz|zst)"))] | sort_by(.ModTime) | .[:-3][] | .Name' 2>/dev/null)
           
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
             echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"
