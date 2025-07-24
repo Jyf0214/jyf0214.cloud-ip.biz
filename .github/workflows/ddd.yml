@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Versioned Backups - Complete)
+name: CI with Persistent Environment (Versioned Backups - Complete with Enhanced Cleanup)
 
 # 工作流触发器
 on:
@@ -126,9 +126,27 @@ jobs:
           MNT_DIR=${{ env.CHROOT_DIR }}
           sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
 
-      - name: 7. 清理 Chroot 环境空间
+      - name: 7. [增强] 清理 Chroot 环境空间
         if: steps.restore_or_create.outputs.restored == 'true'
-        run: sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y > /dev/null 2>&1; rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache"
+        run: |
+          echo "--- 开始深度清理 Chroot 环境 ---"
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "
+            echo '1. 清理 apt 缓存...'
+            apt-get clean -y > /dev/null 2>&1
+            apt-get autoclean -y > /dev/null 2>&1
+            apt-get autoremove -y > /dev/null 2>&1
+            rm -rf /var/lib/apt/lists/*
+            
+            echo '2. 清理通用临时文件和日志...'
+            rm -rf /tmp/* /var/tmp/*
+            find /var/log -type f -name '*.log' -delete
+            find /var/log -type f -name '*.gz' -delete
+            
+            echo '3. 清理用户缓存和历史记录...'
+            rm -rf /root/.cache /root/.npm /root/.bash_history
+            
+            echo '✅ Chroot 环境清理完成。'
+          "
 
       - name: 8A. [自动化路径] 启动服务
         if: steps.restore_or_create.outputs.restored == 'true' && (github.event.inputs.run_startup_script || 'true') == 'true'
@@ -275,3 +293,13 @@ jobs:
           else
             echo "无需清理，备份数量小于或等于3。"
           fi
+
+      - name: 11. [新增] 清理运行器残留文件
+        if: always()
+        run: |
+          echo "--- 开始清理运行器环境 ---"
+          sudo rm -rf ${{ env.CHROOT_DIR }}
+          rm -rf chatgpt-on-wechat
+          npm cache clean --force
+          pip cache purge
+          echo "✅ 运行器清理完成。"
