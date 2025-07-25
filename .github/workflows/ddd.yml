@@ -58,7 +58,7 @@ jobs:
       - uses: actions/setup-python@v4
         with: { python-version: "3.9" }
 
-      - name: 5. ⚡️ 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
+      - name: 5. ⚡️ [调试增强] 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         run: |
           BG_LOG_FILE=$(mktemp)
@@ -71,46 +71,63 @@ jobs:
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
 
-            # --- [ENHANCED] 版本化恢复逻辑 (支持 .zst 和 .gz) ---
-            echo "1. 正在查找最新的版本化备份..."
-            LATEST_VERSIONED_FILENAME=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                                      jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}") and (.Name | test("\\.tar\\.(gz|zst)$")))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
+            # --- [DEBUG ENHANCED] 增强的恢复逻辑，带连接检查 ---
+            REMOTE_FULL_PATH="webdav:${{ env.WEBDAV_REMOTE_PATH }}/"
+            echo "1. 正在测试与 WebDAV 的连接并检查路径 [${REMOTE_FULL_PATH}] 是否存在..."
+            
+            # [FIX] 增加明确的连接和路径检查，如果失败则直接报错退出
+            if ! rclone lsf "${REMOTE_FULL_PATH}" >/dev/null; then
+                echo "❌ 致命错误: 无法访问 WebDAV 路径 [${REMOTE_FULL_PATH}]。" >&2
+                echo "   请检查以下几点:" >&2
+                echo "   1. 仓库 Secrets 中的 WEBDAV_URL, WEBDAV_USER, WEBDAV_PASS 是否正确。" >&2
+                echo "   2. 环境变量 WEBDAV_REMOTE_PATH (当前为 '${{ env.WEBDAV_REMOTE_PATH }}') 在服务器上是否存在。" >&2
+                echo "   3. GitHub Actions 运行器网络是否能访问您的 WebDAV 服务器。" >&2
+                exit 1
+            fi
+            echo "   ✅ 连接成功，路径有效。"
 
+            echo "2. 正在查找最新的版本化备份..."
+            # [FIX] 移除了 2>/dev/null，让错误可以被看到
+            LATEST_VERSIONED_FILENAME=$(rclone lsjson "${REMOTE_FULL_PATH}" | \
+                                      jq -r '[.[] | select(.Name | startswith("${{ env.BACKUP_PREFIX }}") and (.Name | test("\\.tar\\.(gz|zst)$")))] | sort_by(.ModTime) | .[-1].Name')
+
+            LATEST_BACKUP_PATH=""
             if [[ -n "$LATEST_VERSIONED_FILENAME" && "$LATEST_VERSIONED_FILENAME" != "null" ]]; then
                 echo "   -> 发现最新版本化备份: ${LATEST_VERSIONED_FILENAME}"
                 LATEST_BACKUP_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${LATEST_VERSIONED_FILENAME}"
             else
                 echo "   -> 未找到版本化备份。正在查找旧版备份 (${{ env.OLD_BACKUP_FILE }})..."
-                if rclone lsf webdav:${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }} > /dev/null 2>&1; then
+                if rclone lsf "${REMOTE_FULL_PATH}${! env.OLD_BACKUP_FILE}" > /dev/null 2>&1; then
                     echo "   -> 发现旧版备份。"
                     LATEST_BACKUP_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${{ env.OLD_BACKUP_FILE }}"
                 fi
             fi
 
             if [[ -n "$LATEST_BACKUP_PATH" ]]; then
-              echo "--- [后台任务] ✅ 发现可用备份: ${LATEST_BACKUP_PATH}。开始下载..."
-              # [OPTIMIZED] 根据文件后缀选择不同的解压方式
+              echo "3. [后台任务] ✅ 发现可用备份: ${LATEST_BACKUP_PATH}。开始下载和解压..."
+              
               if [[ "$LATEST_BACKUP_PATH" == *.tar.zst ]]; then
                 LOCAL_BACKUP_PATH="/tmp/backup.tar.zst"
                 rclone copyto "webdav:${LATEST_BACKUP_PATH}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-                echo "--- [后台任务] ✅ 下载完成。开始使用 zstd 解压..."
+                echo "   -> 正在使用 zstd 解压..."
                 unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
               else # 默认处理 .tar.gz
                 LOCAL_BACKUP_PATH="/tmp/backup.tar.gz"
                 rclone copyto "webdav:${LATEST_BACKUP_PATH}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-                echo "--- [后台任务] ✅ 下载完成。开始使用 pigz 解压..."
+                echo "   -> 正在使用 pigz 解压..."
                 pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
               fi
               rm -f ${LOCAL_BACKUP_PATH}
+              echo "   -> ✅ 解压完成。"
             else
-              echo "--- [后台任务] ⚠️ 所有类型的备份均未找到。将创建全新系统..."
+              echo "3. [后台任务] ⚠️ 所有类型的备份均未找到。将创建全新系统..."
               sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
             fi
-            echo "--- [后台任务] ✅ 任务成功完成 ---"
+            echo "--- [后台任务] ✅ Chroot 环境设置成功 ---"
           ) > ${BG_LOG_FILE} 2>&1 &
           CHROOT_SETUP_PID=$!
           
-          # 前台任务：部署 Python 应用
+          # 前台任务照常运行
           echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
           npm install -g pm2; rm -rf chatgpt-on-wechat
           git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/chatgpt-on-wechat.git || true
