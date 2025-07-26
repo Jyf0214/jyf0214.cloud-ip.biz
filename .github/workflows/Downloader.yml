@@ -44,5 +44,5 @@ jobs:
       - name: 4. 运行 Kemono 下载器 (Run Kemono Downloader)
         run: |
           echo "正在运行 Kemono 下载器..."
-          python veiled-journeys/oplist-kemono_downloader.py
+          python veiled-journeys/kemono_downloader.py
           echo "✅ Kemono 下载器执行完毕。"
