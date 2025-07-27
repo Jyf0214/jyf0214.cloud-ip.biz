@@ -7,8 +7,14 @@ jobs:
   speed-test:
     runs-on: ubuntu-latest
     env:
-      TEST_FILE: "test1gb.bin"  # 测试文件名
-      RCLONE_CONFIG: /tmp/rclone.conf  # rclone 配置文件路径
+      # --- 全局环境变量 ---
+      TEST_FILE: "test1gb.bin"
+      RCLONE_CONFIG: /tmp/rclone.conf
+      
+      # 将密码作为整个作业的环境变量
+      # 这样所有步骤中的 rclone 命令都能访问到
+      RCLONE_CONFIG_KOOFR_PASS: ${{ secrets.WEBDAVK_PASS }}
+      RCLONE_CONFIG_GDRIVE_PASS: ${{ secrets.WEBDAVK_PASS }} # 假设 gdrive 和 koofr 使用相同的密码
 
     steps:
     - name: 安装 rclone ⚙️
@@ -18,7 +24,7 @@ jobs:
 
     - name: 配置 rclone 🔑
       run: |
-        # 注意：这里不再包含 "pass" 字段
+        # 配置文件中依旧不包含任何 "pass" 字段
         cat > $RCLONE_CONFIG <<EOF
         [koofr]
         type = webdav
@@ -35,9 +41,8 @@ jobs:
         
         chmod 600 $RCLONE_CONFIG
         echo "Rclone 配置完成！"
-        # 为了验证，我们仍然需要提供密码来列出远程
-        echo "列出远程 (需要密码):"
-        RCLONE_CONFIG_KOOFR_PASS=${{ secrets.WEBDAVK_PASS }} RCLONE_CONFIG_GDRIVE_PASS=${{ secrets.WEBDAVK_PASS }} rclone listremotes --config $RCLONE_CONFIG
+        # 此命令现在可以正常工作，因为环境变量已在作业级别设置
+        rclone listremotes --config $RCLONE_CONFIG
 
     - name: 生成 1GB 测试文件 ⚙️
       run: |
@@ -46,9 +51,7 @@ jobs:
 
     - name: 测试 Koofr 目录 ⬆️⬇️
       id: test_koofr
-      # 通过 env 将密码作为环境变量传递给 rclone
-      env:
-        RCLONE_CONFIG_KOOFR_PASS: ${{ secrets.WEBDAVK_PASS }}
+      # 此处不再需要单独的 env 块
       run: |
         # 上传测试
         echo "🔄 开始上传到 Koofr 目录..."
@@ -78,9 +81,7 @@ jobs:
 
     - name: 测试 GDrive 目录 ⬆️⬇️
       id: test_gdrive
-      # 通过 env 将密码作为环境变量传递给 rclone
-      env:
-        RCLONE_CONFIG_GDRIVE_PASS: ${{ secrets.WEBDAVK_PASS }}
+      # 此处不再需要单独的 env 块
       run: |
         # 上传测试
         echo "🔄 开始上传到 GDrive 目录..."
