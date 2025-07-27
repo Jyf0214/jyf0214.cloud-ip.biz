@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     
     # 作业步骤
-    step:
+    steps:
       - name: 1. 安装所需依赖 (Install dependencies)
         run: |
           echo "正在安装 rclone 和 pigz (用于多线程压缩)..."
