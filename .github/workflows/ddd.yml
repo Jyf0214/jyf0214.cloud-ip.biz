@@ -1,12 +1,12 @@
 # 工作流名称
-name: CI with Persistent Environment (Versioned Backups - ZSTD Enhanced v2)
+name: CI with Persistent Environment (Versioned Backups - ZSTD Enhanced v3)
 
 # 工作流触发器
 on:
   workflow_dispatch:
     inputs:
       # --- 核心控制开关 ---
-      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份?', required: true, type: boolean, default: true }
+      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: true }
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       
@@ -32,7 +32,6 @@ env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_PREFIX: minisys_backup_
   WEBDAV_REMOTE_PATH: "backup"
-  RUN_DURATION_MINUTES: 300
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
   # Secrets
   PAT: ${{ secrets.PAT }}
@@ -48,7 +47,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (ZSTD Enhanced v2)"
+    name: "Run All Services (ZSTD Enhanced v3)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -79,7 +78,6 @@ jobs:
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
 
-            # --- [整合与增强] 统一恢复逻辑 (优先zstd，兼容gz) ---
             echo "1. 正在查找最新的备份 (优先 .zst, 其次 .gz)..."
             LATEST_BACKUP_FILENAME=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
                                       jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
@@ -151,9 +149,12 @@ jobs:
             echo '✅ Chroot 环境清理完成。'
           "
 
-      - name: 8A. [自动化路径] 根据开关启动各项服务
+      - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
         # 仅在 'restored' 成功, 'run_startup_script' 启用, 且 'enable_ssh' 未启用的情况下运行
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
+        # [核心改动] 根据是否备份，动态设置运行时长
+        env:
+          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
           # 使用 tee 和 here-document 创建启动脚本
@@ -168,54 +169,25 @@ jobs:
           export RUN_OPENLIST='${{ github.event.inputs.run_openlist }}'
           export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp }}'
           export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel }}'
-          
-          # --- 传递Secrets ---
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
           export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
           export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
           export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
           export NAPCATUSER='${{ env.NAPCATUSER }}'
           export NAPCATPASS='${{ env.NAPCATPASS }}'
-
-          # --- 执行环境 ---
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
 
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
           if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          
           echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
           
-          if [[ "\$RUN_LAUNCHER" == "true" ]]; then
-            echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"
-          else echo "2. [已禁用] 跳过 launcher。"; fi
-
-          if [[ "\$RUN_REDIS" == "true" ]]; then
-            echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
-          else echo "3. [已禁用] 跳过 Redis。"; fi
-
-          if [[ "\$RUN_YUNZAI" == "true" ]]; then
-            echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"
-          else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
-
-          if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then
-            echo "5. 启动 loophole..."
-            if [ -f "\${HOME_DIR}/loophole/loophole" ]; then
-                cd "\${HOME_DIR}/loophole"
-                pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"
-                if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then
-                    echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
-                fi
-            else echo "  -> 警告: loophole 未找到。"; fi
-          else echo "5. [已禁用] 跳过 loophole。"; fi
-
-          if [[ "\$RUN_OPENLIST" == "true" ]]; then
-            echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"
-          else echo "6. [已禁用] 跳过 openlist。"; fi
-
-          if [[ "\$RUN_CHMLFRP" == "true" ]]; then
-            echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"
-          else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
+          if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
+          if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
+          if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
+          if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
+          if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
 
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
           pm2 save && pm2 ls
@@ -224,21 +196,22 @@ jobs:
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
 
-          echo "🚀 所有服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
-          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
+          # [核心改动] 使用动态设置的变量来控制暂停时间
+          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
+          sleep ${RUNTIME_MINUTES}m
           echo "⏳ 规定运行时间已到。"
 
       - name: 8B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
-        with: { limit-access-to-actor: true, wait-timeout-minutes: 100 }
+        with: { limit-access-to-actor: true, wait-timeout-minutes: 350 } # 为手动调试提供固定较长时长
 
       - name: 9. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
       - name: 10. ⚡️ [极速] 创建版本化备份 (zstd 高压缩) 并清理旧版本
-        if: success() && !cancelled() && (github.event.inputs.create_backup_on_finish || 'true') == 'true'
+        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
           echo "--- 1. 使用 zstd (高压缩等级) 创建新的高速备份 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
@@ -248,7 +221,6 @@ jobs:
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
 
-          # --- [增强] 压缩时排除不必要目录，并使用更高压缩等级(-15)以减小体积 ---
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat webdav:${{ env.WEBDAV_REMOTE_PATH }}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
