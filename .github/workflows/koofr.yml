@@ -18,25 +18,26 @@ jobs:
 
     - name: 配置 rclone 🔑
       run: |
+        # 注意：这里不再包含 "pass" 字段
         cat > $RCLONE_CONFIG <<EOF
         [koofr]
         type = webdav
         url = https://app.koofr.net/dav/Koofr/
         vendor = other
         user = ${{ secrets.WEBDAVK_USER }}
-        pass = ${{ secrets.WEBDAVK_PASS }}
-        
+
         [gdrive]
         type = webdav
         url = https://app.koofr.net/dav/GDrive/
         vendor = other
         user = ${{ secrets.WEBDAVK_USER }}
-        pass = ${{ secrets.WEBDAVK_PASS }}
         EOF
         
         chmod 600 $RCLONE_CONFIG
         echo "Rclone 配置完成！"
-        rclone listremotes --config $RCLONE_CONFIG
+        # 为了验证，我们仍然需要提供密码来列出远程
+        echo "列出远程 (需要密码):"
+        RCLONE_CONFIG_KOOFR_PASS=${{ secrets.WEBDAVK_PASS }} RCLONE_CONFIG_GDRIVE_PASS=${{ secrets.WEBDAVK_PASS }} rclone listremotes --config $RCLONE_CONFIG
 
     - name: 生成 1GB 测试文件 ⚙️
       run: |
@@ -45,6 +46,9 @@ jobs:
 
     - name: 测试 Koofr 目录 ⬆️⬇️
       id: test_koofr
+      # 通过 env 将密码作为环境变量传递给 rclone
+      env:
+        RCLONE_CONFIG_KOOFR_PASS: ${{ secrets.WEBDAVK_PASS }}
       run: |
         # 上传测试
         echo "🔄 开始上传到 Koofr 目录..."
@@ -74,6 +78,9 @@ jobs:
 
     - name: 测试 GDrive 目录 ⬆️⬇️
       id: test_gdrive
+      # 通过 env 将密码作为环境变量传递给 rclone
+      env:
+        RCLONE_CONFIG_GDRIVE_PASS: ${{ secrets.WEBDAVK_PASS }}
       run: |
         # 上传测试
         echo "🔄 开始上传到 GDrive 目录..."
