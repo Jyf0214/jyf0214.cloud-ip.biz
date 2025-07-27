@@ -1,252 +1,120 @@
-# 工作流名称
-name: CI with Persistent Environment (Versioned Backups - ZSTD Enhanced)
+name: Koofr WebDAV Speed Test
 
-# 工作流触发器
 on:
-  workflow_dispatch:
-    inputs:
-      use_cache: { description: '是否启用恢复缓存?', required: true, type: boolean, default: true }
-      run_startup_script: { description: '是否自动执行启动脚本?', required: true, type: boolean, default: true }
-      enable_ssh: { description: '是否启用SSH手动调试?', required: true, type: boolean, default: false }
-      enable_napcat_tunnel: { description: '是否启用Napcat内网穿透?', required: true, type: boolean, default: false }
-  schedule:
-    - cron: '30 */6 * * *'
-
-# 并发控制
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
-# 全局环境变量
-env:
-  CHROOT_DIR: /mnt/minisys
-  BACKUP_PREFIX: minisys_backup_
-  WEBDAV_REMOTE_PATH: "backup"
-  RUN_DURATION_MINUTES: 300
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  # Secrets
-  PAT: ${{ secrets.PAT }}
-  LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
-  LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
-  LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
-  LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
-  WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-  NAPCATUSER: ${{ secrets.NAPCATUSER }}
-  NAPCATPASS: ${{ secrets.NAPCATPASS }}
+  workflow_dispatch:  # 手动触发测试
 
 jobs:
-  build-and-run-all:
-    name: "Run All Services (ZSTD Enhanced)"
+  speed-test:
     runs-on: ubuntu-latest
+    env:
+      TEST_FILE: "test1gb.bin"  # 测试文件名
+      RCLONE_CONFIG: /tmp/rclone.conf  # rclone 配置文件路径
+
     steps:
-      - name: 1. 检出代码
-        uses: actions/checkout@v4
+    - name: 安装 rclone ⚙️
+      run: |
+        curl https://rclone.org/install.sh | sudo bash
+        rclone version
 
-      - name: 2. 最大化运行器磁盘空间
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+    - name: 配置 rclone 🔑
+      run: |
+        cat > $RCLONE_CONFIG <<EOF
+        [koofr]
+        type = webdav
+        url = https://app.koofr.net/dav/Koofr/
+        vendor = other
+        user = ${{ secrets.WEBDAVK_USER }}
+        pass = ${{ secrets.WEBDAVK_PASS }}
+        
+        [gdrive]
+        type = webdav
+        url = https://app.koofr.net/dav/GDrive/
+        vendor = other
+        user = ${{ secrets.WEBDAVK_USER }}
+        pass = ${{ secrets.WEBDAVK_PASS }}
+        EOF
+        
+        chmod 600 $RCLONE_CONFIG
+        echo "Rclone 配置完成！"
+        rclone listremotes --config $RCLONE_CONFIG
 
-      - name: 3. 安装全部所需依赖 (新增 zstd)
-        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
+    - name: 生成 1GB 测试文件 ⚙️
+      run: |
+        dd if=/dev/urandom of=$TEST_FILE bs=1M count=1024
+        ls -lh $TEST_FILE
 
-      - name: 4. 设置 Python 和 Node.js 环境
-        uses: actions/setup-node@v3
-        with: { node-version: '18' }
-      - uses: actions/setup-python@v4
-        with: { python-version: "3.9" }
+    - name: 测试 Koofr 目录 ⬆️⬇️
+      id: test_koofr
+      run: |
+        # 上传测试
+        echo "🔄 开始上传到 Koofr 目录..."
+        start_time=$(date +%s.%N)
+        rclone copy $TEST_FILE koofr: --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        upload_time=$(echo "$end_time - $start_time" | bc)
+        upload_speed=$(echo "scale=2; 1024 / $upload_time" | bc)
+        echo "📤 Koofr 上传速度: $upload_speed MB/s"
+        echo "koofr_upload_speed=$upload_speed" >> $GITHUB_OUTPUT
+        
+        # 下载测试
+        echo "🔄 开始从 Koofr 目录下载..."
+        start_time=$(date +%s.%N)
+        rclone copy koofr:$TEST_FILE ./downloaded_koofr.bin --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        download_time=$(echo "$end_time - $start_time" | bc)
+        download_speed=$(echo "scale=2; 1024 / $download_time" | bc)
+        echo "📥 Koofr 下载速度: $download_speed MB/s"
+        echo "koofr_download_speed=$download_speed" >> $GITHUB_OUTPUT
+        
+        # 清理
+        rclone delete koofr:$TEST_FILE --config $RCLONE_CONFIG -v
+        rm -f downloaded_koofr.bin
 
-      - name: 5. ⚡️ 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
-        id: restore_or_create
-        run: |
-          BG_LOG_FILE=$(mktemp)
-          echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
+    - name: 测试 GDrive 目录 ⬆️⬇️
+      id: test_gdrive
+      run: |
+        # 上传测试
+        echo "🔄 开始上传到 GDrive 目录..."
+        start_time=$(date +%s.%N)
+        rclone copy $TEST_FILE gdrive: --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        upload_time=$(echo "$end_time - $start_time" | bc)
+        upload_speed=$(echo "scale=2; 1024 / $upload_time" | bc)
+        echo "📤 GDrive 上传速度: $upload_speed MB/s"
+        echo "gdrive_upload_speed=$upload_speed" >> $GITHUB_OUTPUT
+        
+        # 下载测试
+        echo "🔄 开始从 GDrive 目录下载..."
+        start_time=$(date +%s.%N)
+        rclone copy gdrive:$TEST_FILE ./downloaded_gdrive.bin --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        download_time=$(echo "$end_time - $start_time" | bc)
+        download_speed=$(echo "scale=2; 1024 / $download_time" | bc)
+        echo "📥 GDrive 下载速度: $download_speed MB/s"
+        echo "gdrive_download_speed=$download_speed" >> $GITHUB_OUTPUT
+        
+        # 清理
+        rclone delete gdrive:$TEST_FILE --config $RCLONE_CONFIG -v
+        rm -f downloaded_gdrive.bin
 
-          # 启动后台任务：智能恢复或创建 Chroot 环境
-          (
-            set -eo pipefail
-            echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
-            sudo mkdir -p ${{ env.CHROOT_DIR }}
-            rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
+    - name: 清理测试文件 🧹
+      run: |
+        rm -f $TEST_FILE
 
-            # --- [整合与增强] 统一恢复逻辑 (优先zstd，兼容gz) ---
-            echo "1. 正在查找最新的备份 (优先 .zst, 其次 .gz)..."
-            LATEST_BACKUP_FILENAME=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                                      jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
-
-            if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
-                echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
-                LOCAL_BACKUP_PATH="/tmp/backup.archive"
-                rclone copyto "webdav:${{ env.WEBDAV_REMOTE_PATH }}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-                echo "--- [后台任务] ✅ 下载完成。开始解压..."
-                
-                # 根据文件扩展名选择解压方式
-                if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
-                    echo "   -> 使用 zstd 进行解压..."
-                    unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                else
-                    echo "   -> 使用 pigz (gzip) 进行解压..."
-                    pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                fi
-                rm -f ${LOCAL_BACKUP_PATH}
-            else
-              echo "--- [后台任务] ⚠️ 所有类型的备份均未找到。将创建全新系统..."
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-            fi
-            echo "--- [后台任务] ✅ 任务成功完成 ---"
-          ) > ${BG_LOG_FILE} 2>&1 &
-          CHROOT_SETUP_PID=$!
-          
-          # 前台任务：部署 Python 应用
-          echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
-          npm install -g pm2; rm -rf chatgpt-on-wechat
-          git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/chatgpt-on-wechat.git || true
-          cd chatgpt-on-wechat
-          python -m pip install --upgrade pip
-          pip install -r requirements-optional.txt --target ./ || true
-          pip install -r requirements.txt --target ./ || true
-          pm2 start "python3 app.py" --name "python-app"
-          
-          echo "--- [前台任务] ✅ Python 应用已启动。等待后台 Chroot 任务完成... ---"
-          if ! wait ${CHROOT_SETUP_PID}; then
-            echo "=================================================" >&2; echo "❌ ERROR: 后台 Chroot 设置任务失败！" >&2; echo "以下是后台任务的详细日志：" >&2; echo "-------------------------------------------------" >&2; cat ${BG_LOG_FILE} >&2; echo "=================================================" >&2; exit 1
-          fi
-          
-          echo "--- ✅ 所有并行任务完成 ---"
-          if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
-
-      - name: 6. 挂载虚拟文件系统
-        run: |
-          MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
-
-      - name: 7. [增强] 清理 Chroot 环境空间
-        if: steps.restore_or_create.outputs.restored == 'true'
-        run: |
-          echo "--- 开始深度清理 Chroot 环境 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "
-            echo '1. 清理 apt 缓存...'
-            apt-get clean -y > /dev/null 2>&1
-            apt-get autoclean -y > /dev/null 2>&1
-            apt-get autoremove -y > /dev/null 2>&1
-            rm -rf /var/lib/apt/lists/*
-            
-            echo '2. 清理通用临时文件和日志...'
-            rm -rf /tmp/* /var/tmp/*
-            find /var/log -type f -name '*.log' -delete
-            find /var/log -type f -name '*.gz' -delete
-            
-            echo '3. 清理用户缓存和历史记录...'
-            rm -rf /root/.cache /root/.npm /root/.bash_history
-            
-            echo '✅ Chroot 环境清理完成。'
-          "
-
-      - name: 8A. [自动化路径] 启动服务
-        if: steps.restore_or_create.outputs.restored == 'true' && (github.event.inputs.run_startup_script || 'true') == 'true'
-        run: |
-          echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # 使用 tee 和 here-document 创建启动脚本
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
-          #!/bin/bash
-          set -e
-          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
-          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
-          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
-          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
-          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
-          export NAPCATUSER='${{ env.NAPCATUSER }}'
-          export NAPCATPASS='${{ env.NAPCATPASS }}'
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
-          HOME_DIR="/root"
-
-          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          
-          echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
-          
-          echo "2. 启动 launcher..."
-          [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"
-          
-          echo "3. 启动 Redis..."
-          command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
-          
-          echo "4. 启动 Yunzai-Bot..."
-          [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"
-
-          echo "5. 启动 loophole..."
-          if [ -f "\${HOME_DIR}/loophole/loophole" ]; then
-              cd "\${HOME_DIR}/loophole"
-              pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"
-              if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then
-                  echo "  -> 启用 Napcat 隧道...";
-                  pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
-              fi
-          else echo "  -> 警告: loophole 未找到。"; fi
-
-          echo "6. 启动 openlist..."
-          [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"
-
-          echo "7. 启动 ChmlFrp..."
-          [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"
-          
-          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
-          pm2 save && pm2 ls
-          EOF
-          
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-
-          echo "🚀 所有服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
-          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
-          echo "⏳ 规定运行时间已到。"
-
-      - name: 8B. [手动调试路径] 启用 SSH
-        if: github.event.inputs.enable_ssh == 'true'
-        uses: lhotari/action-upterm@v1
-        with: { limit-access-to-actor: true, wait-timeout-minutes: 100 }
-
-      - name: 9. 卸载虚拟文件系统
-        if: always()
-        run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
-
-      - name: 10. ⚡️ [极速] 创建版本化备份 (zstd) 并清理旧版本
-        if: success() && !cancelled() && (github.event.inputs.use_cache || 'true') == 'true'
-        run: |
-          echo "--- 1. 使用 zstd 创建新的高速备份 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
-          pm2 stop python-app || true
-          rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst" # <-- 使用 .zst 扩展名
-          echo "新备份文件名: ${NEW_BACKUP_FILE}"
-
-          # --- [增强] 压缩时排除不必要目录 ---
-          EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache'"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -c | rclone rcat webdav:${{ env.WEBDAV_REMOTE_PATH }}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新备份上传成功。"
-
-          echo "--- 2. 清理旧备份 (保留3个最新, 兼容 gz/zst) ---"
-          FILES_TO_DELETE=$(rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | \
-                              jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-3][] | .Name' 2>/dev/null)
-          
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
-            echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"
-            for file_name in $FILES_TO_DELETE; do
-              FULL_REMOTE_PATH="${{ env.WEBDAV_REMOTE_PATH }}/${file_name}"
-              echo "Deleting: $FULL_REMOTE_PATH"; rclone deletefile "webdav:${FULL_REMOTE_PATH}"
-            done
-            echo "✅ 旧备份清理完毕。"
-          else
-            echo "无需清理，备份数量小于或等于3。"
-          fi
-
-      - name: 11. [新增] 清理运行器残留文件
-        if: always()
-        run: |
-          echo "--- 开始清理运行器环境 ---"
-          sudo rm -rf ${{ env.CHROOT_DIR }}
-          rm -rf chatgpt-on-wechat
-          npm cache clean --force
-          pip cache purge
-          echo "✅ 运行器清理完成。"
+    - name: 显示测试结果 📊
+      run: |
+        echo "--------------------------------"
+        echo "🔥 Koofr WebDAV 测速结果"
+        echo "--------------------------------"
+        echo "📂 Koofr 目录 (https://app.koofr.net/dav/Koofr/)"
+        echo "📤 上传速度: ${{ steps.test_koofr.outputs.koofr_upload_speed }} MB/s"
+        echo "📥 下载速度: ${{ steps.test_koofr.outputs.koofr_download_speed }} MB/s"
+        echo ""
+        echo "📂 GDrive 目录 (https://app.koofr.net/dav/GDrive/)"
+        echo "📤 上传速度: ${{ steps.test_gdrive.outputs.gdrive_upload_speed }} MB/s"
+        echo "📥 下载速度: ${{ steps.test_gdrive.outputs.gdrive_download_speed }} MB/s"
+        echo "--------------------------------"
