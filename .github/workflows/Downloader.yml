@@ -19,29 +19,19 @@ jobs:
     runs-on: ubuntu-latest
     
     # 作业步骤
-    steps:
-      - name: 1. 最大化运行器磁盘空间 (Maximize runner disk space)
-        run: |
-          echo "清理前，初始磁盘空间："
-          df -h /
-          echo "开始清理预装软件以释放空间..."
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          echo "✅ 清理完成，当前可用空间："
-          df -h /
-
-      - name: 2. 安装所需依赖 (Install dependencies)
+    step:
+      - name: 1. 安装所需依赖 (Install dependencies)
         run: |
           echo "正在安装 rclone 和 pigz (用于多线程压缩)..."
           sudo apt-get update
-          sudo apt-get install -y rclone pigz
           pip install --upgrade pip
-          pip install requests tqdm py7zr webdavclient3 rarfile
+          pip install requests tqdm py7zr webdavclient3 raffle upstash-redis 
           echo "✅ 依赖安装完毕。"
 
-      - name: 3. 克隆下载器仓库 (Clone Downloader Repository)
+      - name: 2. 克隆下载器仓库 (Clone Downloader Repository)
         run: git clone https://x-access-token:${PAT}@github.com/Jyf0214/veiled-journeys.git
 
-      - name: 4. 运行 Kemono 下载器 (Run Kemono Downloader)
+      - name: 3. 运行 Kemono 下载器 (Run Kemono Downloader)
         run: |
           echo "正在运行 Kemono 下载器..."
           python veiled-journeys/kemono_downloader.py
