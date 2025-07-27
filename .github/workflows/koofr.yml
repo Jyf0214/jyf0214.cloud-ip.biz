@@ -1,0 +1,80 @@
+name: Koofr WebDAV Speed Test
+
+on:
+  workflow_dispatch:  # 手动触发测试
+
+jobs:
+  speed-test:
+    runs-on: ubuntu-latest
+    env:
+      WEBDAV_URL: "https://app.koofr.net/dav"  # Koofr WebDAV 地址
+      TEST_FILE: "test1gb.bin"                 # 测试文件名
+      TEST_DIR: "speed-test"                   # Koofr 测试目录
+      
+    steps:
+    - name: 安装依赖工具
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y davfs2 curl bc  # 安装 WebDAV 客户端和计算工具
+        sudo touch /etc/davfs2/secrets
+        sudo chmod 600 /etc/davfs2/secrets
+        
+    - name: 配置 WebDAV 凭据 🔑
+      run: |
+        echo "${{ secrets.WEBDAVK_URL }} ${{ secrets.WEBDAVK_USER }} ${{ secrets.WEBDAVK_PASS }}" | sudo tee -a /etc/davfs2/secrets
+      env:
+        WEBDAV_URL: ${{ secrets.WEBDAVK_URL }}
+        WEBDAV_USER: ${{ secrets.WEBDAVK_USER }}
+        WEBDAV_PASS: ${{ secrets.WEBDAVK_PASS }}
+
+    - name: 生成 1GB 测试文件 ⚙️
+      run: |
+        dd if=/dev/urandom of=$TEST_FILE bs=1M count=1024
+        ls -lh $TEST_FILE
+
+    - name: 创建挂载点 📂
+      run: |
+        mkdir -p mnt/koofr
+        sudo mount -t davfs $WEBDAV_URL mnt/koofr
+        mkdir -p "mnt/koofr/$TEST_DIR"
+
+    - name: 上传速度测试 ⬆️
+      run: |
+        start_time=$(date +%s)
+        cp -v $TEST_FILE "mnt/koofr/$TEST_DIR/"
+        end_time=$(date +%s)
+        
+        upload_time=$((end_time - start_time))
+        upload_speed=$(echo "scale=2; 1024 / $upload_time" | bc)
+        
+        echo "✅ 上传完成！耗时: $upload_time 秒"
+        echo "📤 上传速度: $upload_speed MB/s"
+        echo "UPLOAD_SPEED=$upload_speed MB/s" >> $GITHUB_ENV
+
+    - name: 下载速度测试 ⬇️
+      run: |
+        start_time=$(date +%s)
+        cp -v "mnt/koofr/$TEST_DIR/$TEST_FILE" downloaded.bin
+        end_time=$(date +%s)
+        
+        download_time=$((end_time - start_time))
+        download_speed=$(echo "scale=2; 1024 / $download_time" | bc)
+        
+        echo "✅ 下载完成！耗时: $download_time 秒"
+        echo "📥 下载速度: $download_speed MB/s"
+        echo "DOWNLOAD_SPEED=$download_speed MB/s" >> $GITHUB_ENV
+
+    - name: 清理测试环境 🧹
+      run: |
+        rm -f $TEST_FILE downloaded.bin
+        rm -f "mnt/koofr/$TEST_DIR/$TEST_FILE"
+        sudo umount mnt/koofr
+
+    - name: 显示测试结果 📊
+      run: |
+        echo "--------------------------------"
+        echo "🔥 Koofr WebDAV 测速结果"
+        echo "--------------------------------"
+        echo "📤 上传速度: ${{ env.UPLOAD_SPEED }}"
+        echo "📥 下载速度: ${{ env.DOWNLOAD_SPEED }}"
+        echo "--------------------------------"
