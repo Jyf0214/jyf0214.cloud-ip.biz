@@ -7,74 +7,114 @@ jobs:
   speed-test:
     runs-on: ubuntu-latest
     env:
-      WEBDAVK_URL: "https://app.koofr.net/dav/Koofr/"  # Koofr WebDAV 地址
-      TEST_FILE: "test1gb.bin"                 # 测试文件名
-      TEST_DIR: "speed-test"                   # Koofr 测试目录
-      
+      TEST_FILE: "test1gb.bin"  # 测试文件名
+      RCLONE_CONFIG: /tmp/rclone.conf  # rclone 配置文件路径
+
     steps:
-    - name: 安装依赖工具
+    - name: 安装 rclone ⚙️
       run: |
-        sudo apt-get update
-        sudo apt-get install -y davfs2 curl bc  # 安装 WebDAV 客户端和计算工具
-        sudo touch /etc/davfs2/secrets
-        sudo chmod 600 /etc/davfs2/secrets
+        curl https://rclone.org/install.sh | sudo bash
+        rclone version
+
+    - name: 配置 rclone 🔑
+      run: |
+        cat > $RCLONE_CONFIG <<EOF
+        [koofr]
+        type = webdav
+        url = https://app.koofr.net/dav/Koofr/
+        vendor = other
+        user = ${{ secrets.WEBDAVK_USER }}
+        pass = ${{ secrets.WEBDAVK_PASS }}
         
-    - name: 配置 WebDAV 凭据 🔑
-      run: |
-        echo "${{ secrets.WEBDAVK_URL }} ${{ secrets.WEBDAVK_USER }} ${{ secrets.WEBDAVK_PASS }}" | sudo tee -a /etc/davfs2/secrets
-      env:
-        WEBDAV_URL: ${{ secrets.WEBDAVK_URL }}
-        WEBDAV_USER: ${{ secrets.WEBDAVK_USER }}
-        WEBDAV_PASS: ${{ secrets.WEBDAVK_PASS }}
+        [gdrive]
+        type = webdav
+        url = https://app.koofr.net/dav/GDrive/
+        vendor = other
+        user = ${{ secrets.WEBDAVK_USER }}
+        pass = ${{ secrets.WEBDAVK_PASS }}
+        EOF
+        
+        chmod 600 $RCLONE_CONFIG
+        echo "Rclone 配置完成！"
+        rclone listremotes --config $RCLONE_CONFIG
 
     - name: 生成 1GB 测试文件 ⚙️
       run: |
         dd if=/dev/urandom of=$TEST_FILE bs=1M count=1024
         ls -lh $TEST_FILE
 
-    - name: 创建挂载点 📂
+    - name: 测试 Koofr 目录 ⬆️⬇️
+      id: test_koofr
       run: |
-        mkdir -p mnt/koofr
-        sudo mount -t davfs $WEBDAV_URL mnt/koofr
-        mkdir -p "mnt/koofr/$TEST_DIR"
-
-    - name: 上传速度测试 ⬆️
-      run: |
-        start_time=$(date +%s)
-        cp -v $TEST_FILE "mnt/koofr/$TEST_DIR/"
-        end_time=$(date +%s)
+        # 上传测试
+        echo "🔄 开始上传到 Koofr 目录..."
+        start_time=$(date +%s.%N)
+        rclone copy $TEST_FILE koofr: --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
         
-        upload_time=$((end_time - start_time))
+        upload_time=$(echo "$end_time - $start_time" | bc)
         upload_speed=$(echo "scale=2; 1024 / $upload_time" | bc)
+        echo "📤 Koofr 上传速度: $upload_speed MB/s"
+        echo "koofr_upload_speed=$upload_speed" >> $GITHUB_OUTPUT
         
-        echo "✅ 上传完成！耗时: $upload_time 秒"
-        echo "📤 上传速度: $upload_speed MB/s"
-        echo "UPLOAD_SPEED=$upload_speed MB/s" >> $GITHUB_ENV
-
-    - name: 下载速度测试 ⬇️
-      run: |
-        start_time=$(date +%s)
-        cp -v "mnt/koofr/$TEST_DIR/$TEST_FILE" downloaded.bin
-        end_time=$(date +%s)
+        # 下载测试
+        echo "🔄 开始从 Koofr 目录下载..."
+        start_time=$(date +%s.%N)
+        rclone copy koofr:$TEST_FILE ./downloaded_koofr.bin --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
         
-        download_time=$((end_time - start_time))
+        download_time=$(echo "$end_time - $start_time" | bc)
         download_speed=$(echo "scale=2; 1024 / $download_time" | bc)
+        echo "📥 Koofr 下载速度: $download_speed MB/s"
+        echo "koofr_download_speed=$download_speed" >> $GITHUB_OUTPUT
         
-        echo "✅ 下载完成！耗时: $download_time 秒"
-        echo "📥 下载速度: $download_speed MB/s"
-        echo "DOWNLOAD_SPEED=$download_speed MB/s" >> $GITHUB_ENV
+        # 清理
+        rclone delete koofr:$TEST_FILE --config $RCLONE_CONFIG -v
+        rm -f downloaded_koofr.bin
 
-    - name: 清理测试环境 🧹
+    - name: 测试 GDrive 目录 ⬆️⬇️
+      id: test_gdrive
       run: |
-        rm -f $TEST_FILE downloaded.bin
-        rm -f "mnt/koofr/$TEST_DIR/$TEST_FILE"
-        sudo umount mnt/koofr
+        # 上传测试
+        echo "🔄 开始上传到 GDrive 目录..."
+        start_time=$(date +%s.%N)
+        rclone copy $TEST_FILE gdrive: --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        upload_time=$(echo "$end_time - $start_time" | bc)
+        upload_speed=$(echo "scale=2; 1024 / $upload_time" | bc)
+        echo "📤 GDrive 上传速度: $upload_speed MB/s"
+        echo "gdrive_upload_speed=$upload_speed" >> $GITHUB_OUTPUT
+        
+        # 下载测试
+        echo "🔄 开始从 GDrive 目录下载..."
+        start_time=$(date +%s.%N)
+        rclone copy gdrive:$TEST_FILE ./downloaded_gdrive.bin --config $RCLONE_CONFIG -v
+        end_time=$(date +%s.%N)
+        
+        download_time=$(echo "$end_time - $start_time" | bc)
+        download_speed=$(echo "scale=2; 1024 / $download_time" | bc)
+        echo "📥 GDrive 下载速度: $download_speed MB/s"
+        echo "gdrive_download_speed=$download_speed" >> $GITHUB_OUTPUT
+        
+        # 清理
+        rclone delete gdrive:$TEST_FILE --config $RCLONE_CONFIG -v
+        rm -f downloaded_gdrive.bin
+
+    - name: 清理测试文件 🧹
+      run: |
+        rm -f $TEST_FILE
 
     - name: 显示测试结果 📊
       run: |
         echo "--------------------------------"
         echo "🔥 Koofr WebDAV 测速结果"
         echo "--------------------------------"
-        echo "📤 上传速度: ${{ env.UPLOAD_SPEED }}"
-        echo "📥 下载速度: ${{ env.DOWNLOAD_SPEED }}"
+        echo "📂 Koofr 目录 (https://app.koofr.net/dav/Koofr/)"
+        echo "📤 上传速度: ${{ steps.test_koofr.outputs.koofr_upload_speed }} MB/s"
+        echo "📥 下载速度: ${{ steps.test_koofr.outputs.koofr_download_speed }} MB/s"
+        echo ""
+        echo "📂 GDrive 目录 (https://app.koofr.net/dav/GDrive/)"
+        echo "📤 上传速度: ${{ steps.test_gdrive.outputs.gdrive_upload_speed }} MB/s"
+        echo "📥 下载速度: ${{ steps.test_gdrive.outputs.gdrive_download_speed }} MB/s"
         echo "--------------------------------"
