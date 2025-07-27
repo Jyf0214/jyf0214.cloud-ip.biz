@@ -7,7 +7,7 @@ jobs:
   speed-test:
     runs-on: ubuntu-latest
     env:
-      WEBDAV_URL: "https://app.koofr.net/dav"  # Koofr WebDAV 地址
+      WEBDAVK_URL: "https://app.koofr.net/dav"  # Koofr WebDAV 地址
       TEST_FILE: "test1gb.bin"                 # 测试文件名
       TEST_DIR: "speed-test"                   # Koofr 测试目录
       
