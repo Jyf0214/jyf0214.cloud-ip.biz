@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Chroot Environment (B2 Enhanced)
+name: CI with Persistent Chroot Environment (Enhanced)
 
 # 工作流触发器：手动触发 (workflow_dispatch)
 on:
@@ -23,26 +23,19 @@ on:
 
 # 全局环境变量
 env:
-  # --- 系统与应用配置 ---
   CHROOT_DIR: /mnt/minisys
+  BACKUP_FILE: minisys_backup.tar.gz
+  WEBDAV_REMOTE_PATH: "backup"
+  B2_REMOTE_NAME: b2
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  B2_BACKUP_DIR: backup
+  BACKUP_PREFIX: minisys_backup_
+  BACKUP_RETENTION_COUNT: 2
   RUN_DURATION_MINUTES: 300
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
-  
-  # --- WebDAV 冷启动备份配置 (仅在B2无备份时作为一次性回迁源) ---
-  WEBDAV_REMOTE_PATH: "backup"
-  WEBDEV_BACKUP_FILE: minisys_backup.tar.gz
-
-  # --- Backblaze B2 主备份配置 ---
-  B2_REMOTE_NAME: b2 # rclone 远程配置名
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_BACKUP_DIR: backup
-  BACKUP_PREFIX: minisys_backup_ # 备份文件前缀
-  BACKUP_RETENTION_COUNT: 2 # 在B2上保留的最新备份数量
-  B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
-  B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
 
 # 作业定义
 jobs:
@@ -63,82 +56,84 @@ jobs:
 
       - name: 2. 安装所需依赖 (Install dependencies)
         run: |
-          echo "正在安装 debootstrap, rclone 和 pigz (用于多线程压缩)..."
+          echo "正在安装 debootstrap, rclone, pigz 和 b2cli (用于多线程压缩和 B2 CLI)..."
           sudo apt-get update
           sudo apt-get install -y debootstrap rclone pigz
+          pip install --upgrade b2
           echo "✅ 依赖安装完毕。"
 
-      - name: 3. 恢复备份 (B2优先) 或创建新系统
+      - name: 3. 恢复备份或创建新系统 (Restore backup or create new system)
         id: restore_or_create
         env:
           WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
           WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
           WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+          B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
+          B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
         run: |
           sudo mkdir -p ${{ env.CHROOT_DIR }}
           if [[ "${{ github.event.inputs.use_cache }}" == "true" ]]; then
-            # --- B2 恢复逻辑 (主路径) ---
-            echo "正在配置 rclone for Backblaze B2..."
-            rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
-            
-            echo "🔎 正在检查 Backblaze B2 上的最新备份..."
-            LATEST_B2_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} | grep '${{ env.BACKUP_PREFIX }}' | sort -r | head -n 1)
+            echo "🔎 用户选择启用缓存。正在配置 rclone 和 b2..."
+            rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
+            b2 account authorize "${B2_ACCOUNT_ID}" "${B2_ACCOUNT_KEY}"
 
-            if [[ -n "${LATEST_B2_BACKUP}" ]]; then
-              echo "✅ 在 B2 上发现最新备份: ${LATEST_B2_BACKUP}"
-              B2_BACKUP_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${LATEST_B2_BACKUP}"
-              
-              MAX_RETRIES=3
-              for ((i=1; i<=MAX_RETRIES; i++)); do
-                echo "🔄 (第 ${i}/${MAX_RETRIES} 次尝试) 正在从 B2 流式恢复系统..."
-                if rclone cat "${B2_BACKUP_PATH}" | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; then
-                  echo "✅ B2 备份恢复成功。"
-                  echo "restored=true" >> $GITHUB_OUTPUT
-                  break
-                fi
-                if [[ ${i} -lt ${MAX_RETRIES} ]]; then
-                  echo "⚠️ 第 ${i} 次恢复失败。将在 10 秒后重试..."
-                  sleep 10
+            # 定义下载重试函数
+            retry_download() {
+              local max_attempts=3
+              local attempt=1
+              local cmd="$1"
+              local output="$2"
+              while [ $attempt -le $max_attempts ]; do
+                echo "尝试第 $attempt 次执行: $cmd"
+                if eval "$cmd"; then
+                  echo "✅ 下载成功"
+                  return 0
                 else
-                  echo "❌ 从 B2 恢复多次失败。"
+                  echo "⚠️ 下载失败"
+                  if [ $attempt -lt $max_attempts ]; then
+                    sleep $((attempt * 5))
+                  fi
+                  ((attempt++))
                 fi
               done
-            else
-              echo "ℹ️ B2 中未发现任何备份。"
-            fi
+              echo "❌ 重试 $max_attempts 次后仍失败"
+              return 1
+            }
 
-            # --- WebDAV 恢复逻辑 (仅当B2恢复失败或为空时触发) ---
-            if [[ ! -f "$GITHUB_OUTPUT" || $(grep -c "restored=true" "$GITHUB_OUTPUT") -eq 0 ]]; then
-              echo "🤔 B2 中无可用备份，正在尝试从 WebDAV 回迁初始备份..."
-              rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-              
-              if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${WEBDEV_BACKUP_FILE} > /dev/null; then
-                echo "✅ 在 WebDAV 上发现可用备份，正在恢复..."
-                # 使用临时文件确保完整性和可迁移性
-                sudo rclone copy webdav:${WEBDAV_REMOTE_PATH}/${WEBDEV_BACKUP_FILE} /tmp/
-                
-                if sudo pigz -dc /tmp/${WEBDEV_BACKUP_FILE} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; then
-                  echo "✅ WebDAV 备份恢复成功。"
-                  echo "restored=true" >> $GITHUB_OUTPUT
-                  
-                  echo "🚀 正在将此初始备份迁移到 Backblaze B2..."
-                  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-                  B2_NEW_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
-                  cat /tmp/${WEBDEV_BACKUP_FILE} | rclone rcat ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${B2_NEW_FILENAME} --progress
-                  echo "✅ 初始备份已上传到 B2，文件名为: ${B2_NEW_FILENAME}"
-                else
-                  echo "⚠️ WebDAV 备份文件似乎已损坏，将创建全新系统。"
-                fi
-                sudo rm -f /tmp/${WEBDEV_BACKUP_FILE}
+            # 首先尝试从 B2 下载备份
+            if b2 ls "${B2_BUCKET_NAME}" "${B2_BACKUP_DIR}/${BACKUP_FILE}" > /dev/null 2>&1; then
+              echo "✅ 发现 B2 备份，正在尝试下载并解压..."
+              retry_download "b2 download-file-by-name '${B2_BUCKET_NAME}' '${B2_BACKUP_DIR}/${BACKUP_FILE}' - | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}" "B2"
+              if [ $? -eq 0 ]; then
+                echo "restored=true" >> $GITHUB_OUTPUT
               else
-                echo "⚠️ WebDAV 中也未发现备份。"
+                echo "⚠️ B2 备份下载或解压失败，将尝试 WebDAV..."
               fi
             fi
-          fi
 
-          # --- 创建全新系统 (最后防线) ---
-          if [[ ! -f "$GITHUB_OUTPUT" || $(grep -c "restored=true" "$GITHUB_OUTPUT") -eq 0 ]]; then
-            echo "ℹ️ 所有缓存选项均无效。将创建全新系统..."
+            # 如果 B2 没有备份或下载失败，则尝试 WebDAV
+            if [ "$(cat $GITHUB_OUTPUT | grep 'restored=true' | wc -l)" -eq 0 ]; then
+              if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} > /dev/null 2>&1; then
+                echo "✅ 发现 WebDAV 备份，正在尝试下载并解压..."
+                retry_download "rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}" "WebDAV"
+                if [ $? -eq 0 ]; then
+                  echo "restored=true" >> $GITHUB_OUTPUT
+                  # 将 WebDAV 备份上传到 B2
+                  echo "正在将 WebDAV 备份上传到 B2..."
+                  rclone cat webdav:${WEBDAV_REMOTE_PATH}/${BACKUP_FILE} | b2 upload-file "${B2_BUCKET_NAME}" - "${B2_BACKUP_DIR}/${BACKUP_FILE}"
+                else
+                  echo "⚠️ WebDAV 备份下载或解压失败，将创建新系统..."
+                  sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+                  echo "restored=false" >> $GITHUB_OUTPUT
+                fi
+              else
+                echo "⚠️ 未发现 WebDAV 备份，将创建新系统..."
+                sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+                echo "restored=false" >> $GITHUB_OUTPUT
+              fi
+            fi
+          else
+            echo "ℹ️ 用户选择不使用缓存。将创建全新系统..."
             sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
             echo "restored=false" >> $GITHUB_OUTPUT
           fi
@@ -278,34 +273,16 @@ jobs:
           sudo umount -l "${MNT_DIR}/sys" || true
           echo "✅ 虚拟文件系统已全部卸载。"
 
-      - name: 8. 备份系统环境到 Backblaze B2 并清理旧备份
+      - name: 8. 备份系统环境到 Backblaze B2 (Backup environment to B2)
         if: ${{ !cancelled() }}
+        env:
+          B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
+          B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
         run: |
-          echo "正在停止 chroot 环境中的所有 pm2 服务..."
+          echo "开始使用 pigz 多线程流式打包并上传备份到 B2..."
+          # 停止 chroot 环境中的所有 pm2 服务
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
-          echo "正在配置 rclone for Backblaze B2..."
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
-
-          echo "开始使用 pigz 多线程流式打包并上传备份到 B2..."
-          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          NEW_BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
-          B2_UPLOAD_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${NEW_BACKUP_FILENAME}"
-          
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat "${B2_UPLOAD_PATH}" --progress
-          echo "✅ 新备份 ${NEW_BACKUP_FILENAME} 已上传至 B2。"
-
-          echo "正在执行备份清理策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          BACKUP_FILES_TO_DELETE=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} | grep '${{ env.BACKUP_PREFIX }}' | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
-
-          if [[ -n "${BACKUP_FILES_TO_DELETE}" ]]; then
-            echo "将要删除以下旧备份:"
-            echo "${BACKUP_FILES_TO_DELETE}"
-            echo "${BACKUP_FILES_TO_DELETE}" | while read -r file; do
-              rclone deletefile ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/"$file"
-            done
-            echo "✅ 旧备份清理完毕。"
-          else
-            echo "ℹ️ 无需清理旧备份。"
-          fi
-          echo "✅ 备份及清理流程执行完毕。"
+          b2 account authorize "${B2_ACCOUNT_ID}" "${B2_ACCOUNT_KEY}"
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | b2 upload-file "${B2_BUCKET_NAME}" - "${B2_BACKUP_DIR}/${BACKUP_FILE}"
+          echo "✅ 备份流程执行完毕。"
