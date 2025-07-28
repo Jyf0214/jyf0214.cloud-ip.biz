@@ -1,337 +1,266 @@
 # 工作流名称
-name: CI with Persistent Environment (Backblaze B2 Backups - v8 Secure)
+name: CI with Persistent Chroot Environment (Backblaze B2)
 
-# 工作流触发器
+# 工作流触发器：手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
     inputs:
-      # --- 核心调试与模式开关 ---
-      no_cache:
-        description: '🚫 [模式] 不恢复备份,强制创建全新环境? (服务不会自动启动,将强制SSH,但结束时仍会备份)'
-        required: true
-        type: boolean
-        default: false
-      enable_ssh:
-        description: '🐞 [调试] 正常模式下, 是否启用SSH手动调试 (将暂停自动化)?'
-        required: true
-        type: boolean
-        default: false
-
-      # --- 核心功能开关 (no_cache=false 时有效) ---
-      create_backup_on_finish:
-        description: '✅ [核心] 是否在结束时创建环境备份? (无论是否使用无缓存模式,此开关都有效)'
+      use_cache:
+        description: '是否启用恢复缓存 (Restore from backup?)'
         required: true
         type: boolean
         default: true
       run_startup_script:
-        description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本? (无缓存模式下无效)'
+        description: '是否自动执行启动脚本 (Auto-run startup script?)'
         required: true
         type: boolean
         default: true
-      
-      # --- 服务启动控制 (run_startup_script=true 时有效) ---
-      services_to_run:
-        description: '  - 要启动的服务列表 (逗号分隔, 如: launcher,redis,yunzai). 留空或填 "all" 启动所有默认服务.'
-        type: string
-        default: 'launcher,redis,yunzai,loophole_webdav,openlist,chmlfrp'
+      enable_ssh:
+        description: '是否启用SSH手动调试 (Enable SSH for manual debug?)'
+        required: true
+        type: boolean
+        default: false
 
-# 并发控制
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-# ========================================================================================
-# --- 全局环境变量 (集中管理所有配置和密钥) ---
-# ========================================================================================
+# 全局环境变量
 env:
-  # --- 基础路径和配置 ---
+  # --- Chroot & Runtime Config ---
   CHROOT_DIR: /mnt/minisys
-  PYTHON_APP_REPO_DIR: chatgpt-on-wechat
-  NODE_VERSION: '18'
+  RUN_DURATION_MINUTES: 300
 
   # --- Backblaze B2 备份配置 ---
   B2_REMOTE_NAME: b2
-  BACKUP_PREFIX: minisys_backup_
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_BACKUP_DIR: backup
-  BACKUP_RETENTION_COUNT: 3
+  BACKUP_PREFIX: minisys_backup_
+  BACKUP_RETENTION_COUNT: 2
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-
-  # --- GitHub & App Secrets ---
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # 注意: 此变量不再被echo, 仅供内部潜在使用
-  PAT: ${{ secrets.YUNZAIBOT_PAT }}
 
-  # --- Chroot 内服务所需 Secrets ---
+  # --- In-Chroot App Secrets (e.g., Loophole) ---
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
-  NAPCATUSER: ${{ secrets.NAPCATUSER }}
-  NAPCATPASS: ${{ secrets.NAPCATPASS }}
 
+# 作业定义
 jobs:
-  build-and-run-all:
-    name: "Run All Services (B2 Enhanced v8)"
+  build-and-debug:
+    # 运行环境
     runs-on: ubuntu-latest
+
+    # 作业步骤
     steps:
-      - name: 1. 检出代码
-        uses: actions/checkout@v4
+      - name: 1. 最大化运行器磁盘空间 (Maximize runner disk space)
+        run: |
+          echo "清理前，初始磁盘空间："
+          df -h /
+          echo "开始清理预装软件以释放空间..."
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          echo "✅ 清理完成，当前可用空间："
+          df -h /
 
-      - name: 2. 最大化运行器磁盘空间
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+      - name: 2. 安装所需依赖 (Install dependencies)
+        run: |
+          echo "正在安装 debootstrap, rclone 和 pigz (用于多线程压缩)..."
+          sudo apt-get update
+          sudo apt-get install -y debootstrap rclone pigz
+          echo "✅ 依赖安装完毕。"
 
-      - name: 3. 安装全部所需依赖
-        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
-
-      - name: 4. 设置运行器的 Node.js 和 Python 环境
-        uses: actions/setup-node@v3
-        with: { node-version: '${{ env.NODE_VERSION }}' }
-      - uses: actions/setup-python@v4
-        with: { python-version: "3.9" }
-
-      - name: 5A. [缓存模式] ⚡️ 并行执行：智能恢复 Chroot & 部署应用
-        if: github.event.inputs.no_cache == 'false'
+      - name: 3. 恢复备份或创建新系统 (Restore backup or create new system)
         id: restore_or_create
         run: |
-          # 此步骤的脚本与 v7 版本相同，并行恢复和部署
-          BG_LOG_FILE=$(mktemp)
-          echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
-
-          # 启动后台任务：智能恢复或创建 Chroot 环境
-          (
-            set -eo pipefail
-            echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
-            sudo mkdir -p ${{ env.CHROOT_DIR }}
-            rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${B2_ACCOUNT_ID}" key "${B2_ACCOUNT_KEY}"
-
-            echo "1. 正在从 Backblaze B2 (${B2_BUCKET_NAME}) 的根目录查找最新的备份..."
-            LATEST_BACKUP_FILENAME=$(rclone lsjson ${{ env.B2_REMOTE_NAME }}:${B2_BUCKET_NAME}/ | \
-                                      jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
-
-            if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
-                echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
-                LOCAL_BACKUP_PATH="/tmp/backup.archive"
-                rclone copyto "${{ env.B2_REMOTE_NAME }}:${B2_BUCKET_NAME}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-                echo "--- [后台任务] ✅ 下载完成。开始解压..."
-                
-                if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
-                    unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                else
-                    pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                fi
-                rm -f ${LOCAL_BACKUP_PATH}
-            else
-              echo "--- [后台任务] ⚠️ 所有类型的备份均未找到。将创建全新系统..."
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-            fi
-            echo "--- [后台任务] ✅ Chroot 恢复/创建任务成功完成 ---"
-          ) > ${BG_LOG_FILE} 2>&1 &
-          CHROOT_SETUP_PID=$!
-          
-          # 前台任务：部署 Python 应用
-          echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
-          npm install -g pm2; rm -rf ${{ env.PYTHON_APP_REPO_DIR }}
-          git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/${{ env.PYTHON_APP_REPO_DIR }}.git || true
-          cd ${{ env.PYTHON_APP_REPO_DIR }} && python -m pip install --upgrade pip && pip install -r requirements.txt --target ./ || true && pm2 start "python3 app.py" --name "python-app"
-          
-          echo "--- [前台任务] ✅ Python 应用已启动。等待后台 Chroot 任务完成... ---"
-          if ! wait ${CHROOT_SETUP_PID}; then
-            echo "=================================================" >&2; echo "❌ ERROR: 后台 Chroot 设置任务失败！" >&2; cat ${BG_LOG_FILE} >&2; exit 1
-          fi
-          
-          echo "--- ✅ 所有并行任务完成 ---"
-          if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
-      
-      - name: 5B. [无缓存模式] 创建全新的 Chroot 环境
-        if: github.event.inputs.no_cache == 'true'
-        run: |
-          echo "🚫 检测到无缓存模式, 将创建全新的 Chroot 环境..."
           sudo mkdir -p ${{ env.CHROOT_DIR }}
-          sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-          echo "✅ 全新 Chroot 环境创建完成。"
+          if [[ "${{ github.event.inputs.use_cache }}" == "true" ]]; then
+            echo "🔎 用户选择启用缓存。正在配置 rclone (B2) 并检查备份..."
+            rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
 
-      - name: 6. 挂载虚拟文件系统
-        run: |
-          MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
-
-      - name: 7A. [缓存模式] 清理 Chroot 环境空间
-        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.no_cache == 'false'
-        run: |
-          # 仅在恢复了备份时执行清理
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "set -x; apt-get clean -y; apt-get autoremove -y; rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; find /var/log -type f -delete"
-
-      - name: 7B. [修复] 安装 Chroot 环境内的 Node.js 和 PM2
-        # 在自动化或无缓存调试模式下，都需要确保chroot内有Node.js环境
-        if: (github.event.inputs.run_startup_script == 'true' && github.event.inputs.no_cache == 'false') || github.event.inputs.no_cache == 'true'
-        run: |
-          echo "--- [Chroot Prep] 开始在 Chroot 环境中安装 Node.js 和 PM2 ---"
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh > /dev/null << EOF
-          #!/bin/bash
-          set -ex
-          echo "nameserver 8.8.8.8" > /etc/resolv.conf
-          apt-get update -y && apt-get install -y curl ca-certificates
-          if ! command -v node &> /dev/null; then
-            curl -fsSL https://deb.nodesource.com/setup_${{ env.NODE_VERSION }}.x | bash -
-            apt-get install -y nodejs
+            echo "正在查找最新的备份文件..."
+            LATEST_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --filter "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort -r | head -n 1)
+            
+            if [ -n "$LATEST_BACKUP" ]; then
+              echo "✅ 发现最新备份: $LATEST_BACKUP。正在使用 pigz 多线程流式恢复系统..."
+              rclone cat ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/$LATEST_BACKUP ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+              echo "restored=true" >> $GITHUB_OUTPUT
+            else
+              echo "⚠️ 未发现云端备份 (B2)。将自动转为创建新系统..."
+              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+              echo "restored=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "ℹ️ 用户选择不使用缓存。将创建全新系统..."
+            sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+            echo "restored=false" >> $GITHUB_OUTPUT
           fi
-          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          rm -f /tmp/prepare_env.sh
-          EOF
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/prepare_env.sh
 
-      - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
-        if: github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false' && github.event.inputs.no_cache == 'false'
-        env:
-          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
+      - name: 4. 挂载虚拟文件系统到 Chroot 环境 (Mount virtual filesystems)
         run: |
-          echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # 创建将在 Chroot 环境内执行的启动脚本
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
+          echo "正在挂载虚拟文件系统..."
+          MNT_DIR=${{ env.CHROOT_DIR }}
+          sudo mount -t proc proc "${MNT_DIR}/proc"
+          sudo mount -o bind /dev "${MNT_DIR}/dev"
+          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
+          sudo mount -o bind /sys "${MNT_DIR}/sys"
+          echo "✅ 虚拟文件系统已挂载。"
+
+      - name: 5. 清理 Chroot 环境空间 (Clean chroot environment)
+        run: |
+          echo "🧹 开始清理 chroot 环境内的缓存和临时文件..."
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
+            echo '  -> 正在清理 apt 缓存...'; \
+            apt-get clean -y > /dev/null 2>&1; \
+            rm -rf /var/lib/apt/lists/*; \
+            echo '  -> 正在清理临时文件...'; \
+            rm -rf /tmp/* /var/tmp/*; \
+            echo '  -> 正在清理 /root 目录下的缓存...'; \
+            rm -rf /root/.cache; \
+            echo '✅ Chroot 环境清理完成。'"
+
+      - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
+        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
+        run: |
+          echo "✅ 进入自动化运行模式..."
+          
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
           #!/bin/bash
-          set -e
-          # --- 环境设置 ---
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
+
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          echo "服务启动列表: ${SERVICES_TO_RUN}"
-
-          # 清理旧日志和PM2记录
-          pm2 flush
-          find "${HOME_DIR}" -name "*.log" -type f -delete
-
-          # --- 辅助函数 ---
-          # 检查给定的服务名称是否在要运行的服务列表中
-          should_run() {
-              # 如果 SERVICES_TO_RUN 为空, "all", 或者 "*", 则认为应该运行所有服务
-              if [[ -z "${SERVICES_TO_RUN}" || "${SERVICES_TO_RUN}" == "all" || "${SERVICES_TO_RUN}" == "*" ]]; then
-                  return 0 # true
-              fi
-              # 检查服务名是否在逗号分隔的列表中 (注意前后的逗号,确保精确匹配)
-              if [[ ",${SERVICES_TO_RUN}," == *",$1,"* ]]; then
-                  return 0 # true
-              fi
-              return 1 # false
-          }
-
-          # --- 服务启动逻辑 ---
-          # 服务关键词: launcher, redis, yunzai, loophole_webdav, napcat_tunnel, openlist, chmlfrp
           
-          if should_run "launcher"; then
-            (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "-> 警告: launcher.sh 启动失败或未找到。"
+          if ! command -v pm2 &> /dev/null; then
+              echo "  -> PM2 未安装，将使用 npm 全局安装..."
+              npm install -g pm2
           fi
+          
+          echo "1. 正在清理旧的日志文件..."
+          pm2 flush
+          find \${HOME_DIR} -name "*.log" -type f -delete
+          echo "  -> 日志已清理。"
 
-          if should_run "redis"; then
-            if command -v redis-server &> /dev/null; then
+          echo "2. 正在尝试使用 PM2 启动 launcher.sh..."
+          if [ -f "\${HOME_DIR}/launcher.sh" ]; then
+              cd "\${HOME_DIR}"
+              pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"
+          else
+              echo "  -> 警告: \${HOME_DIR}/launcher.sh 未找到，跳过。"
+          fi
+          
+          echo "3. 正在启动 Redis 服务器..."
+          if command -v redis-server &> /dev/null; then
               redis-server --daemonize yes
-            else
-              echo "-> 警告: redis-server 命令未找到。"
-            fi
+          else
+              echo "  -> 警告: redis-server 命令未找到，跳过。"
+          fi
+          
+          echo "4. 正在尝试启动 Yunzai-Bot..."
+          YUNZAI_DIR="\${HOME_DIR}/Yunzai"
+          if [ -d "\${YUNZAI_DIR}" ]; then
+              cd "\${YUNZAI_DIR}"
+              pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"
+          else
+              echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
           fi
 
-          if should_run "yunzai"; then
-            (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "-> 警告: Yunzai 启动失败或未找到。"
+          echo "5. 正在尝试启动 loophole 服务..."
+          LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
+          if [ -f "\${LOOPHOLE_APP}" ]; then
+              cd "\${HOME_DIR}/loophole"
+              # 启动 loophole webdav
+              pm2 start ./loophole --name "loophole-webdav" -- \
+                webdav ~ -u "${{ env.LOOPHOLE_WEBDAV_USER }}" -p "${{ env.LOOPHOLE_WEBDAV_PASS }}" --hostname "${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}"
+              
+              # 启动 loophole http
+              pm2 start ./loophole --name "loophole-http" -- \
+                http 6099 --hostname "${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}"
+          else
+              echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
           fi
 
-          if should_run "loophole_webdav"; then
-            if [ -f "${HOME_DIR}/loophole/loophole" ]; then
-              cd "${HOME_DIR}/loophole"
-              pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
-              # 检查是否也需要启动 napcat 隧道 (作为 loophole 的子服务)
-              if should_run "napcat_tunnel"; then
-                pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
-              fi
-            else
-                echo "-> 警告: Loophole 可执行文件未找到。"
-            fi
+          echo "6. 正在尝试启动 openlist server..."
+          OPENLIST_APP="\${HOME_DIR}/openlist"
+          if [ -f "\${OPENLIST_APP}" ]; then
+              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
+              cd "\${HOME_DIR}"
+              pm2 start ./openlist --name "openlist-server" -- server
+          else
+              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
           fi
 
-          if should_run "openlist"; then
-            (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "-> 警告: openlist 启动失败或未找到。"
+          echo "7. 正在尝试启动 ChmlFrp 服务..."
+          FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
+          if [ -f "\${FRPC_APP}" ]; then
+              echo "  -> 找到 \${FRPC_APP}，正在启动服务..."
+              cd "\${HOME_DIR}/ChmlFrp"
+              pm2 start ./frpc --name "chml-frp" -- -c frpc.ini
+          else
+              echo "  -> 警告: \${FRPC_APP} 未找到，跳过。"
           fi
-
-          if should_run "chmlfrp"; then
-            (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "-> 警告: ChmlFrp 启动失败或未找到。"
-          fi
-
-          # 保存 PM2 进程列表并在日志中显示
-          echo "--- [Chroot 环境内] 服务启动完成 ---"
+          
+          echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
           pm2 save
           pm2 ls
           EOF
 
+          echo "赋予启动脚本执行权限并执行..."
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
 
-          # 将外部的 input 变量作为环境变量传递给 chroot 内的脚本并执行
-          echo "将 'services_to_run' 输入 (${{ github.event.inputs.services_to_run }}) 传递到 Chroot 环境中..."
-          sudo chroot ${{ env.CHROOT_DIR }} bash -c "export SERVICES_TO_RUN='${{ github.event.inputs.services_to_run }}'; /tmp/startup.sh"
+          echo "🚀 服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
+          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
+          echo "⏳ 规定运行时间已到。"
 
-          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."
-          sleep ${RUNTIME_MINUTES}m
-
-      - name: 8B. [调试路径] 启用 SSH
-        # 在 'enable_ssh' 或 'no_cache' 模式下均启用
-        if: github.event.inputs.enable_ssh == 'true' || github.event.inputs.no_cache == 'true'
+      - name: 6B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
+        # 仅在用户选择启用 SSH 时运行
+        if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: ${{ github.event.inputs.no_cache == 'true' && 300 || 350 }}
+          wait-timeout-minutes: 100
 
-      - name: 9. 卸载虚拟文件系统
+      - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
+        # 无论之前的步骤是否成功，都执行此步骤
         if: always()
         run: |
-          sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true
-          sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true
-          sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true
-          sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
+          echo "会话结束。为安全备份，正在卸载所有虚拟文件系统..."
+          MNT_DIR=${{ env.CHROOT_DIR }}
+          sudo umount -l "${MNT_DIR}/dev/pts" || true
+          sudo umount -l "${MNT_DIR}/dev" || true
+          sudo umount -l "${MNT_DIR}/proc" || true
+          sudo umount -l "${MNT_DIR}/sys" || true
+          echo "✅ 虚拟文件系统已全部卸载。"
 
-      - name: 10. [安全/极速] 创建双备份到 B2 并清理旧版本
-        # 仅在成功、非取消、且需要备份的模式下运行。不再受 no_cache 影响。
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
+      - name: 8. 备份系统环境到 Backblaze B2 (Backup environment to Backblaze B2)
+        # 仅在工作流未被取消时执行
+        if: ${{ !cancelled() }}
         run: |
-          echo "--- 准备创建备份 ---"
+          echo "开始使用 pigz 多线程流式打包并上传备份到 Backblaze B2..."
+          # 停止 chroot 环境中的所有 pm2 服务以确保数据一致性
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
-          pm2 stop python-app || true
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${B2_ACCOUNT_ID}" key "${B2_ACCOUNT_KEY}"
           
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
-          REMOTE_ROOT="${{ env.B2_REMOTE_NAME }}:${B2_BUCKET_NAME}"
-          echo "新备份文件名: ${NEW_BACKUP_FILE}"
-
-          EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           
-          echo "--- 1. 使用 zstd 创建并上传到 B2 根目录 ---"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat "${REMOTE_ROOT}/${NEW_BACKUP_FILE}" ${{ env.RCLONE_FLAGS }}
-          echo "✅ 主备份上传成功。"
+          BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
+          REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
 
-          echo "--- 2. 使用 B2 Server-Side-Copy 复制到 /${{ env.B2_BACKUP_DIR }} 目录 ---"
-          rclone copy "${REMOTE_ROOT}/${NEW_BACKUP_FILE}" "${REMOTE_ROOT}/${{ env.B2_BACKUP_DIR }}/" ${{ env.RCLONE_FLAGS }}
-          echo "✅ 第二份备份已同步。"
+          echo "正在上传备份文件: $BACKUP_FILENAME"
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
+          echo "✅ 备份上传成功。"
 
-          # --- [安全移除] 不再打印任何可能包含敏感信息的下载链接 ---
-          echo "✅ 备份文件已上传至 Backblaze B2 的根目录和 /${{ env.B2_BACKUP_DIR }} 目录。"
-
-          echo "--- 3. 清理 B2 上的旧备份 (各保留${{ env.BACKUP_RETENTION_COUNT }}个最新) ---"
-          for a_dir in "" "${{ env.B2_BACKUP_DIR }}/"; do
-            FILES_TO_DELETE=$(rclone lsjson "${REMOTE_ROOT}/${a_dir}" | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*"))] | sort_by(.ModTime) | .[:-${{ env.BACKUP_RETENTION_COUNT }}][] | .Name')
-            if [[ -n "$FILES_TO_DELETE" ]]; then
-              echo "在 /${a_dir} 中清理旧备份: $FILES_TO_DELETE"
-              echo "$FILES_TO_DELETE" | xargs -I {} rclone deletefile "${REMOTE_ROOT}/${a_dir}{}"
-            else
-              echo "在 /${a_dir} 中无需清理旧备份。"
-            fi
-          done
-
-      - name: 11. 清理运行器残留文件
-        if: always()
-        run: |
-          echo "--- 开始清理运行器环境 ---"
-          sudo rm -rf ${{ env.CHROOT_DIR }}
-          if [[ -d "${{ env.PYTHON_APP_REPO_DIR }}" ]]; then rm -rf ${{ env.PYTHON_APP_REPO_DIR }}; fi
-          npm cache clean --force || true
-          pip cache purge || true
-          echo "✅ 运行器清理完成。"
+          echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
+          # 列出所有备份，按名称（时间）排序，保留最新的N个，其余的删除
+          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --filter "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
+          
+          if [ -n "$BACKUPS_TO_DELETE" ]; then
+            echo "🗑️ 发现以下旧备份将被清理:"
+            echo "$BACKUPS_TO_DELETE"
+            for backup in $BACKUPS_TO_DELETE; do
+              echo "  -> 正在删除 $backup ..."
+              rclone deletefile ${REMOTE_PATH}/$backup
+            done
+            echo "✅ 旧备份清理完毕。"
+          else
+            echo "✅ 无需清理旧备份。"
+          fi
+          
+          echo "✅ 备份流程执行完毕。"
