@@ -64,9 +64,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           echo "✅ 清理完成，当前可用空间："
           df -h /
-          sudo sh -c 'echo Jyf0214 > /etc/hostname && hostname -F /etc/hostname'
-          sudo sed -i 's/pkrvmpptgkbjq6m/Jyf0214/g' /etc/hosts
-          exec bash
 
       - name: 2. 安装所需依赖 (Install dependencies)
         run: |
@@ -82,21 +79,42 @@ jobs:
           if [[ "${{ github.event.inputs.use_cache }}" == "true" ]]; then
             echo "🔎 用户选择启用缓存。正在配置 rclone (B2) 并检查备份..."
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
-
-            echo "正在查找最新的备份文件..."
-            LATEST_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort -r | head -n 1)
             
-            if [ -n "$LATEST_BACKUP" ]; then
-              echo "✅ 发现最新备份: $LATEST_BACKUP。正在流式恢复系统..."
-              rclone cat ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/$LATEST_BACKUP ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+            REMOTE_BASE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
+            echo "正在查找最新的备份条目..."
+            LATEST_ENTRY=$(rclone lsf ${REMOTE_BASE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar.gz*" | sort -r | head -n 1)
+            
+            if [ -n "$LATEST_ENTRY" ]; then
+              ACTUAL_BACKUP_PATH=""
+              BACKUP_BASENAME=""
+
+              # *** 兼容性逻辑：判断是旧的目录格式还是新的文件格式 ***
+              if [[ "$LATEST_ENTRY" == */ ]]; then
+                # 旧格式：是一个目录
+                BACKUP_BASENAME="${LATEST_ENTRY%/}" # 移除末尾的'/'
+                ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}${BACKUP_BASENAME}"
+                echo "ℹ️ 发现旧版目录格式备份: ${LATEST_ENTRY}。将从内部恢复: ${ACTUAL_BACKUP_PATH}"
+              else
+                # 新格式：是一个文件
+                BACKUP_BASENAME="$LATEST_ENTRY"
+                ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
+                echo "ℹ️ 发现标准文件格式备份: ${LATEST_ENTRY}。"
+              fi
+
+              echo "✅ 准备恢复备份。正在流式传输并解压..."
+              rclone cat "${ACTUAL_BACKUP_PATH}" ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
               
-              # *** 健壮性增强：验证恢复是否完整 ***
+              # 健壮性增强：验证恢复是否完整
               if [ ! -d "${{ env.CHROOT_DIR }}/proc" ] || [ ! -d "${{ env.CHROOT_DIR }}/bin" ]; then
-                echo "❌ 恢复校验失败！备份文件 '$LATEST_BACKUP' 可能已损坏。"
-                echo "  -> 正在从 B2 删除损坏的备份文件..."
-                rclone deletefile ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/$LATEST_BACKUP
+                echo "❌ 恢复校验失败！备份文件 '$BACKUP_BASENAME' 可能已损坏。"
+                echo "  -> 正在从 B2 删除损坏的备份..."
+                # 根据格式删除目录或文件
+                if [[ "$LATEST_ENTRY" == */ ]]; then
+                    rclone purge "${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
+                else
+                    rclone deletefile "${ACTUAL_BACKUP_PATH}"
+                fi
                 echo "  -> 自动转为创建新系统..."
-                # 清理不完整的恢复内容
                 sudo rm -rf ${{ env.CHROOT_DIR }}/*
                 sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
                 echo "restored=false" >> $GITHUB_OUTPUT
@@ -238,7 +256,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 60
+          wait-timeout-minutes: 100
 
       - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
         # 无论之前的步骤是否成功，都执行此步骤
@@ -256,12 +274,7 @@ jobs:
         # 如果用户选择强制备份，则总是运行。否则，仅在工作流未被取消时运行。
         if: github.event.inputs.force_backup == true || !cancelled()
         run: |
-          # *** 核心修正：先打包到本地，再上传，确保文件完整性 ***
-          echo "正在创建本地压缩包以确保文件完整性..."
-          LOCAL_BACKUP_FILE="/tmp/backup-$(date +%s).tar.gz"
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE}
-          echo "✅ 本地压缩包创建成功: ${LOCAL_BACKUP_FILE}"
-
+          echo "开始打包并上传备份到 Backblaze B2..."
           # 停止 chroot 环境中的所有 pm2 服务以确保数据一致性
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
@@ -269,12 +282,16 @@ jobs:
           
           BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
           REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
+          LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
 
+          echo "正在创建本地压缩包以确保文件完整性..."
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE}
+          echo "✅ 本地压缩包创建成功。"
+
+          # *** 核心修正：使用 rclone copyto 确保将文件上传到指定路径，而不是创建目录 ***
           echo "正在上传备份文件: $BACKUP_FILENAME"
-          rclone copy ${LOCAL_BACKUP_FILE} ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
+          rclone copyto ${LOCAL_BACKUP_FILE} ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
           echo "✅ 备份上传成功。"
-
-          # 清理本地临时文件
           rm -f ${LOCAL_BACKUP_FILE}
 
           echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
