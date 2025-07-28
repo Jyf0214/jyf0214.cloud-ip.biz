@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Backblaze B2 Backups - v4)
+name: CI with Persistent Environment (Backblaze B2 Backups - v5 Fully Secret)
 
 # 工作流触发器
 on:
@@ -10,7 +10,7 @@ on:
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, false }
 
-      # --- [新增] 服务独立启动开关 (仅当 "run_startup_script" 为 true 时生效) ---
+      # --- 服务独立启动开关 ---
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
       run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
@@ -29,13 +29,11 @@ concurrency:
 env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_PREFIX: minisys_backup_
-  B2_REMOTE_PATH: "backups" # 在 B2 Bucket 中的存储目录
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  # 注意: 所有 Secrets 已移至下方步骤中直接使用，或在 env 块中引用 secrets
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 Enhanced v4)"
+    name: "Run All Services (B2 Enhanced v5)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -56,10 +54,10 @@ jobs:
       - name: 5. ⚡️ 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         env:
-          # --- B2 Secrets ---
+          # --- Secrets 注入 ---
           B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
           B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-          # --- Other Secrets ---
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
           PAT: ${{ secrets.YUNZAIBOT_PAT }}
         run: |
           BG_LOG_FILE=$(mktemp)
@@ -70,17 +68,16 @@ jobs:
             set -eo pipefail
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
-            # 配置 rclone 以使用 Backblaze B2
             rclone config create b2 b2 account "${B2_ACCOUNT_ID}" key "${B2_ACCOUNT_KEY}"
 
-            echo "1. 正在从 Backblaze B2 查找最新的备份 (优先 .zst, 其次 .gz)..."
-            LATEST_BACKUP_FILENAME=$(rclone lsjson b2:${{ env.B2_REMOTE_PATH }}/ | \
+            echo "1. 正在从 Backblaze B2 (${B2_BUCKET_NAME}) 查找最新的备份..."
+            LATEST_BACKUP_FILENAME=$(rclone lsjson b2:${B2_BUCKET_NAME}/ | \
                                       jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
 
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
-                rclone copyto "b2:${{ env.B2_REMOTE_PATH }}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
+                rclone copyto "b2:${B2_BUCKET_NAME}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
                 echo "--- [后台任务] ✅ 下载完成。开始解压..."
                 
                 if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
@@ -117,6 +114,8 @@ jobs:
           echo "--- ✅ 所有并行任务完成 ---"
           if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
 
+      # ... [步骤 6 和 7 无变化] ...
+
       - name: 6. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}
@@ -151,6 +150,7 @@ jobs:
           NAPCATUSER: ${{ secrets.NAPCATUSER }}
           NAPCATPASS: ${{ secrets.NAPCATPASS }}
         run: |
+          # ... [此步骤的脚本内容无变化, 因为它不直接与 B2 交互] ...
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
           # 使用 tee 和 here-document 创建启动脚本, 并将 secrets 安全地传递进去
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
@@ -196,6 +196,7 @@ jobs:
           sleep ${RUNTIME_MINUTES}m
           echo "⏳ 规定运行时间已到。"
 
+
       - name: 8B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
@@ -208,15 +209,15 @@ jobs:
       - name: 10. ⚡️ [极速] 创建版本化备份 (zstd) 到 B2 并清理旧版本
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         env:
-          # --- B2 Secrets ---
+          # --- Secrets 注入 ---
           B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
           B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-          B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # B2 公共下载 URL
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
         run: |
-          echo "--- 1. 使用 zstd (高压缩等级) 创建新的高速备份到 Backblaze B2 ---"
+          echo "--- 1. 使用 zstd 创建新的高速备份到 Backblaze B2 (${B2_BUCKET_NAME}) ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
-          # 再次配置 rclone, 确保环境干净
           rclone config create b2 b2 account "${B2_ACCOUNT_ID}" key "${B2_ACCOUNT_KEY}"
           
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
@@ -224,22 +225,20 @@ jobs:
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
 
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat b2:${{ env.B2_REMOTE_PATH }}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat b2:${B2_BUCKET_NAME}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
-          # 输出新备份的公共下载链接
           if [[ -n "${B2_DOWNLOAD_URL}" ]]; then
-            echo "🌍 新备份下载地址: ${B2_DOWNLOAD_URL}/file/${B2_REMOTE_PATH}/${NEW_BACKUP_FILE}"
+            echo "🌍 新备份下载地址: ${B2_DOWNLOAD_URL}/file/${B2_BUCKET_NAME}/${NEW_BACKUP_FILE}"
           fi
 
-          echo "--- 2. 清理 B2 上的旧备份 (保留3个最新, 兼容 gz/zst) ---"
-          FILES_TO_DELETE=$(rclone lsjson b2:${{ env.B2_REMOTE_PATH }}/ | \
+          echo "--- 2. 清理 B2 上的旧备份 (保留3个最新) ---"
+          FILES_TO_DELETE=$(rclone lsjson b2:${B2_BUCKET_NAME}/ | \
                               jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-3][] | .Name' 2>/dev/null)
           
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
             echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"
             for file_name in $FILES_TO_DELETE; do
-              FULL_REMOTE_PATH="${{ env.B2_REMOTE_PATH }}/${file_name}"
-              echo "Deleting: $FULL_REMOTE_PATH"; rclone deletefile "b2:${FULL_REMOTE_PATH}"
+              echo "Deleting: b2://${B2_BUCKET_NAME}/${file_name}"; rclone deletefile "b2:${B2_BUCKET_NAME}/${file_name}"
             done
             echo "✅ 旧备份清理完毕。"
           else
