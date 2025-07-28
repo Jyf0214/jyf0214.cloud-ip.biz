@@ -81,34 +81,30 @@ jobs:
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
             
             REMOTE_BASE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-            echo "正在查找最新的备份条目..."
-            LATEST_ENTRY=$(rclone lsf ${REMOTE_BASE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar.gz*" | sort -r | head -n 1)
+            echo "正在查找最新的备份条目 (兼容 .tar 和 .tar.gz)..."
+            # *** 兼容性修正：查找 .tar* 以同时匹配 .tar 和 .tar.gz ***
+            LATEST_ENTRY=$(rclone lsf ${REMOTE_BASE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar*" | sort -r | head -n 1)
             
             if [ -n "$LATEST_ENTRY" ]; then
               ACTUAL_BACKUP_PATH=""
               BACKUP_BASENAME=""
 
-              # *** 兼容性逻辑：判断是旧的目录格式还是新的文件格式 ***
               if [[ "$LATEST_ENTRY" == */ ]]; then
-                # 旧格式：是一个目录
-                BACKUP_BASENAME="${LATEST_ENTRY%/}" # 移除末尾的'/'
+                BACKUP_BASENAME="${LATEST_ENTRY%/}"
                 ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}${BACKUP_BASENAME}"
                 echo "ℹ️ 发现旧版目录格式备份: ${LATEST_ENTRY}。将从内部恢复: ${ACTUAL_BACKUP_PATH}"
               else
-                # 新格式：是一个文件
                 BACKUP_BASENAME="$LATEST_ENTRY"
                 ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
                 echo "ℹ️ 发现标准文件格式备份: ${LATEST_ENTRY}。"
               fi
 
-              echo "✅ 准备恢复备份。正在流式传输并解压..."
-              rclone cat "${ACTUAL_BACKUP_PATH}" ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+              echo "✅ 准备恢复备份。正在使用自适应管道传输并解压 (自动处理 .gz 或 .tar)..."
+              rclone cat "${ACTUAL_BACKUP_PATH}" ${{ env.RCLONE_FLAGS }} | { pigz -dc || cat; } | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
               
-              # 健壮性增强：验证恢复是否完整
               if [ ! -d "${{ env.CHROOT_DIR }}/proc" ] || [ ! -d "${{ env.CHROOT_DIR }}/bin" ]; then
                 echo "❌ 恢复校验失败！备份文件 '$BACKUP_BASENAME' 可能已损坏。"
                 echo "  -> 正在从 B2 删除损坏的备份..."
-                # 根据格式删除目录或文件
                 if [[ "$LATEST_ENTRY" == */ ]]; then
                     rclone purge "${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
                 else
@@ -159,25 +155,22 @@ jobs:
       - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
         run: |
+          # The content of startup script remains unchanged
           echo "✅ 进入自动化运行模式..."
           
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
           #!/bin/bash
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
-
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          
           if ! command -v pm2 &> /dev/null; then
               echo "  -> PM2 未安装，将使用 npm 全局安装..."
               npm install -g pm2
           fi
-          
           echo "1. 正在清理旧的日志文件..."
           pm2 flush
           find \${HOME_DIR} -name "*.log" -type f -delete
           echo "  -> 日志已清理。"
-
           echo "2. 正在尝试使用 PM2 启动 launcher.sh..."
           if [ -f "\${HOME_DIR}/launcher.sh" ]; then
               cd "\${HOME_DIR}"
@@ -185,14 +178,12 @@ jobs:
           else
               echo "  -> 警告: \${HOME_DIR}/launcher.sh 未找到，跳过。"
           fi
-          
           echo "3. 正在启动 Redis 服务器..."
           if command -v redis-server &> /dev/null; then
               redis-server --daemonize yes
           else
               echo "  -> 警告: redis-server 命令未找到，跳过。"
           fi
-          
           echo "4. 正在尝试启动 Yunzai-Bot..."
           YUNZAI_DIR="\${HOME_DIR}/Yunzai"
           if [ -d "\${YUNZAI_DIR}" ]; then
@@ -201,22 +192,17 @@ jobs:
           else
               echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
           fi
-
           echo "5. 正在尝试启动 loophole 服务..."
           LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
           if [ -f "\${LOOPHOLE_APP}" ]; then
               cd "\${HOME_DIR}/loophole"
-              # 启动 loophole webdav
               pm2 start ./loophole --name "loophole-webdav" -- \
                 webdav ~ -u "${{ env.LOOPHOLE_WEBDAV_USER }}" -p "${{ env.LOOPHOLE_WEBDAV_PASS }}" --hostname "${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}"
-              
-              # 启动 loophole http
               pm2 start ./loophole --name "loophole-http" -- \
                 http 6099 --hostname "${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}"
           else
               echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
           fi
-
           echo "6. 正在尝试启动 openlist server..."
           OPENLIST_APP="\${HOME_DIR}/openlist"
           if [ -f "\${OPENLIST_APP}" ]; then
@@ -226,7 +212,6 @@ jobs:
           else
               echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
           fi
-
           echo "7. 正在尝试启动 ChmlFrp 服务..."
           FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
           if [ -f "\${FRPC_APP}" ]; then
@@ -236,22 +221,18 @@ jobs:
           else
               echo "  -> 警告: \${FRPC_APP} 未找到，跳过。"
           fi
-          
           echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
           pm2 save
           pm2 ls
           EOF
-
           echo "赋予启动脚本执行权限并执行..."
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-
           echo "🚀 服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
           sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
           echo "⏳ 规定运行时间已到。"
 
       - name: 6B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
-        # 仅在用户选择启用 SSH 时运行
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with:
@@ -259,7 +240,6 @@ jobs:
           wait-timeout-minutes: 100
 
       - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
-        # 无论之前的步骤是否成功，都执行此步骤
         if: always()
         run: |
           echo "会话结束。为安全备份，正在卸载所有虚拟文件系统..."
@@ -275,34 +255,65 @@ jobs:
         if: github.event.inputs.force_backup == true || !cancelled()
         run: |
           echo "开始打包并上传备份到 Backblaze B2..."
-          # 停止 chroot 环境中的所有 pm2 服务以确保数据一致性
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
+          echo "正在计算 Chroot 目录大小以确定备份策略..."
+          CHROOT_SIZE_BYTES=$(sudo du -sb ${{ env.CHROOT_DIR }} | awk '{print $1}')
+          SIZE_THRESHOLD_BYTES=4294967296 # 4 GiB
           
-          BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
+          BACKUP_FILENAME=""
+          LOCAL_BACKUP_FILE=""
+
+          if [ "$CHROOT_SIZE_BYTES" -gt "$SIZE_THRESHOLD_BYTES" ]; then
+            echo "✅ 目录大小 ($(printf "%.2f" $(echo "$CHROOT_SIZE_BYTES/1024/1024/1024" | bc -l)) GiB) 大于 4GiB。将执行强制、高可靠性压缩..."
+            BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
+            LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
+            
+            # 使用 set -o pipefail 确保管道中任何命令失败都会导致整个命令失败
+            (set -o pipefail && sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE})
+            
+            if [ $? -ne 0 ] || [ ! -s "${LOCAL_BACKUP_FILE}" ]; then
+              echo "❌ 严重错误：压缩备份过程失败！无法继续备份。"
+              exit 1
+            fi
+            echo "✅ 本地高强度压缩包创建成功。"
+          else
+            echo "✅ 目录大小 ($(printf "%.2f" $(echo "$CHROOT_SIZE_BYTES/1024/1024/1024" | bc -l)) GiB) 小于等于 4GiB。将执行快速、无压缩的 tar 打包..."
+            BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar"
+            LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
+            
+            sudo tar -cpf ${LOCAL_BACKUP_FILE} -C ${{ env.CHROOT_DIR }} .
+            if [ $? -ne 0 ] || [ ! -s "${LOCAL_BACKUP_FILE}" ]; then
+              echo "❌ 严重错误：无压缩打包过程失败！无法继续备份。"
+              exit 1
+            fi
+            echo "✅ 本地无压缩包创建成功。"
+          fi
+
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-          LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
-
-          echo "正在创建本地压缩包以确保文件完整性..."
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE}
-          echo "✅ 本地压缩包创建成功。"
-
-          # *** 核心修正：使用 rclone copyto 确保将文件上传到指定路径，而不是创建目录 ***
+          
           echo "正在上传备份文件: $BACKUP_FILENAME"
           rclone copyto ${LOCAL_BACKUP_FILE} ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
           echo "✅ 备份上传成功。"
           rm -f ${LOCAL_BACKUP_FILE}
 
           echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
+          # *** 兼容性修正：查找 .tar* 以同时匹配 .tar 和 .tar.gz ***
+          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar*" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
           
           if [ -n "$BACKUPS_TO_DELETE" ]; then
             echo "🗑️ 发现以下旧备份将被清理:"
             echo "$BACKUPS_TO_DELETE"
             for backup in $BACKUPS_TO_DELETE; do
-              echo "  -> 正在删除 $backup ..."
-              rclone deletefile ${REMOTE_PATH}/$backup
+              # 兼容性处理：如果条目是目录，则用 purge 删除
+              if [[ "$backup" == */ ]]; then
+                echo "  -> 正在清理旧版目录 $backup ..."
+                rclone purge ${REMOTE_PATH}/$backup
+              else
+                echo "  -> 正在删除文件 $backup ..."
+                rclone deletefile ${REMOTE_PATH}/$backup
+              fi
             done
             echo "✅ 旧备份清理完毕。"
           else
