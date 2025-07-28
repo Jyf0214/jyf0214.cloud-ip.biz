@@ -38,7 +38,8 @@ env:
   B2_BACKUP_DIR: backup
   BACKUP_PREFIX: minisys_backup_
   BACKUP_RETENTION_COUNT: 2
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers-8 --progress"
+  # *** 修正：修复了 --transfers-8 的语法错误 ***
+  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
 
@@ -89,29 +90,24 @@ jobs:
               ACTUAL_BACKUP_PATH=""
               BACKUP_DISPLAY_NAME=""
 
-              # *** 修正：智能处理文件和目录两种格式的备份 ***
               if [[ "$LATEST_ENTRY" == */ ]]; then
-                # 这是旧的目录格式，我们需要找到目录里面的实际文件
                 echo "ℹ️ 发现旧版目录格式备份: ${LATEST_ENTRY}。正在探测其内部的实际备份文件..."
-                # 查找目录内的第一个文件（可能是.tar或.tar.gz）
                 ACTUAL_FILENAME=$(rclone lsf "${REMOTE_BASE_PATH}/${LATEST_ENTRY}" | head -n 1)
                 if [ -z "$ACTUAL_FILENAME" ]; then
                   echo "❌ 恢复失败：备份目录 '${LATEST_ENTRY}' 为空！将删除此空目录并创建新系统。"
                   rclone purge "${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
-                  LATEST_ENTRY="" # 清空，以便后续逻辑把它当作“未找到备份”处理
+                  LATEST_ENTRY="" 
                 else
                   ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}${ACTUAL_FILENAME}"
                   BACKUP_DISPLAY_NAME="${LATEST_ENTRY}${ACTUAL_FILENAME}"
                   echo "✅ 成功定位到实际备份文件: ${ACTUAL_FILENAME}"
                 fi
               else
-                # 这是标准的文件格式
                 echo "ℹ️ 发现标准文件格式备份: ${LATEST_ENTRY}。"
                 ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
                 BACKUP_DISPLAY_NAME="$LATEST_ENTRY"
               fi
 
-              # 只有在成功定位到备份文件后才继续
               if [ -n "$LATEST_ENTRY" ]; then
                 LOCAL_RESTORE_FILE="/tmp/restore_backup.download"
                 echo "✅ 准备恢复备份。正在将 '${BACKUP_DISPLAY_NAME}' 完整下载到本地..."
@@ -119,11 +115,9 @@ jobs:
 
                 if [ ! -s "${LOCAL_RESTORE_FILE}" ]; then
                   echo "❌ 恢复失败：下载的备份文件为空或下载失败！可能是远程文件已损坏。"
-                  # 即使下载失败也要进入下一步创建新系统，这里不再exit 1
-                  LATEST_ENTRY="" # 标记为失败
+                  LATEST_ENTRY=""
                 else
                   echo "✅ 下载完成。正在从本地文件解压（兼容.tar和.tar.gz）..."
-                  # *** 修正：使用健壮的解压命令，无论压缩与否都能处理 ***
                   cat ${LOCAL_RESTORE_FILE} | { pigz -dc || cat; } | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
                   rm -f ${LOCAL_RESTORE_FILE}
                   
@@ -143,7 +137,6 @@ jobs:
               fi
             fi
 
-            # 如果 LATEST_ENTRY 在任何阶段被清空（未找到、空目录、下载失败），则创建新系统
             if [ -z "$LATEST_ENTRY" ]; then
               echo "⚠️ 未能成功恢复备份。将自动创建全新系统..."
               sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
@@ -183,7 +176,6 @@ jobs:
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
         run: |
           echo "🚀 自动化路径：准备在 chroot 环境中启动服务..."
-          # 将机密信息写入临时注入脚本
           cat << EOF > ./inject_secrets.sh
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
           export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
@@ -193,8 +185,6 @@ jobs:
           sudo mv ./inject_secrets.sh ${{ env.CHROOT_DIR }}/root/inject_secrets.sh
           sudo chmod +x ${{ env.CHROOT_DIR }}/root/inject_secrets.sh
 
-          # 执行 chroot 内部的启动脚本
-          # 使用 unshare -f 在新命名空间中运行，以允许systemd或类似服务
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "source /root/inject_secrets.sh && /root/startup.sh" &
 
           echo "✅ 启动脚本已在后台执行。工作流将持续运行 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
@@ -205,8 +195,6 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          # Note: The actual session duration is controlled by the workflow timeout. 
-          # This just defines how long to wait for a connection.
           wait-timeout-minutes: ${{ env.RUN_DURATION_MINUTES }}
 
       - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
@@ -214,7 +202,6 @@ jobs:
         run: |
           echo "会话结束。为安全备份，正在卸载所有虚拟文件系统..."
           MNT_DIR=${{ env.CHROOT_DIR }}
-          # 使用 -l (lazy unmount) 增加成功率
           sudo umount -l "${MNT_DIR}/dev/pts" || true
           sudo umount -l "${MNT_DIR}/dev" || true
           sudo umount -l "${MNT_DIR}/proc" || true
@@ -235,7 +222,6 @@ jobs:
           
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           
-          # *** 修正：统一使用 pigz 压缩，确保备份文件格式一致 ***
           BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
           REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
           LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
@@ -255,14 +241,12 @@ jobs:
           sudo rm -f ${LOCAL_BACKUP_FILE}
 
           echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          # *** 修正：健壮的清理逻辑，可同时处理文件和目录格式的旧备份 ***
-          REMOTE_FULL_PATH="${REMOTE_PATH}/" # 确保路径以/结尾
+          REMOTE_FULL_PATH="${REMOTE_PATH}/"
           BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_FULL_PATH} --include "${{ env.BACKUP_PREFIX }}*" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
           
           if [ -n "$BACKUPS_TO_DELETE" ]; then
             echo "🗑️ 发现以下旧备份将被清理:"
             echo "$BACKUPS_TO_DELETE"
-            # 将字符串转换为数组进行遍历
             for backup_entry in $BACKUPS_TO_DELETE; do
               if [[ "$backup_entry" == */ ]]; then
                 echo "  -> 正在删除旧版目录备份: $backup_entry ..."
