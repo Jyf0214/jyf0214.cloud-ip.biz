@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Chroot Environment (Backblaze B2)
+name: CI with Persistent Chroot Environment (B2 Enhanced)
 
 # 工作流触发器：手动触发 (workflow_dispatch)
 on:
@@ -20,33 +20,29 @@ on:
         required: true
         type: boolean
         default: false
-      force_backup:
-        description: '强制备份? (即使工作流失败或被取消也执行备份) (Force backup? Runs even if workflow fails or is cancelled)'
-        required: true
-        type: boolean
-        default: false
 
 # 全局环境变量
 env:
-  # --- Chroot & Runtime Config ---
+  # --- 系统与应用配置 ---
   CHROOT_DIR: /mnt/minisys
   RUN_DURATION_MINUTES: 300
-
-  # --- Backblaze B2 备份配置 ---
-  B2_REMOTE_NAME: b2
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_BACKUP_DIR: backup
-  BACKUP_PREFIX: minisys_backup_
-  BACKUP_RETENTION_COUNT: 2
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
-  B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-
-  # --- In-Chroot App Secrets (e.g., Loophole) ---
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
+  
+  # --- WebDAV 冷启动备份配置 (仅在B2无备份时作为一次性回迁源) ---
+  WEBDAV_REMOTE_PATH: "backup"
+  WEBDEV_BACKUP_FILE: minisys_backup.tar.gz
+
+  # --- Backblaze B2 主备份配置 ---
+  B2_REMOTE_NAME: b2 # rclone 远程配置名
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  B2_BACKUP_DIR: backup
+  BACKUP_PREFIX: minisys_backup_ # 备份文件前缀
+  BACKUP_RETENTION_COUNT: 2 # 在B2上保留的最新备份数量
+  B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
+  B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
 
 # 作业定义
 jobs:
@@ -67,81 +63,82 @@ jobs:
 
       - name: 2. 安装所需依赖 (Install dependencies)
         run: |
-          echo "正在安装 debootstrap, rclone, pigz..."
+          echo "正在安装 debootstrap, rclone 和 pigz (用于多线程压缩)..."
           sudo apt-get update
           sudo apt-get install -y debootstrap rclone pigz
           echo "✅ 依赖安装完毕。"
 
-      - name: 3. 恢复备份或创建新系统 (Restore backup or create new system)
+      - name: 3. 恢复备份 (B2优先) 或创建新系统
         id: restore_or_create
+        env:
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
         run: |
           sudo mkdir -p ${{ env.CHROOT_DIR }}
           if [[ "${{ github.event.inputs.use_cache }}" == "true" ]]; then
-            echo "🔎 用户选择启用缓存。正在配置 rclone (B2) 并检查备份..."
+            # --- B2 恢复逻辑 (主路径) ---
+            echo "正在配置 rclone for Backblaze B2..."
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
             
-            REMOTE_BASE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-            echo "正在查找最新的备份条目 (包括文件和目录)..."
-            LATEST_ENTRY=$(rclone lsf ${REMOTE_BASE_PATH} --include "${{ env.BACKUP_PREFIX }}*" | sort -r | head -n 1)
-            
-            if [ -n "$LATEST_ENTRY" ]; then
-              ACTUAL_BACKUP_PATH=""
-              BACKUP_DISPLAY_NAME=""
+            echo "🔎 正在检查 Backblaze B2 上的最新备份..."
+            LATEST_B2_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} | grep '${{ env.BACKUP_PREFIX }}' | sort -r | head -n 1)
 
-              if [[ "$LATEST_ENTRY" == */ ]]; then
-                echo "ℹ️ 发现旧版目录格式备份: ${LATEST_ENTRY}。正在探测其内部的实际备份文件..."
-                ACTUAL_FILENAME=$(rclone lsf "${REMOTE_BASE_PATH}/${LATEST_ENTRY}" | head -n 1)
-                if [ -z "$ACTUAL_FILENAME" ]; then
-                  echo "❌ 恢复失败：备份目录 '${LATEST_ENTRY}' 为空！将删除此空目录并创建新系统。"
-                  rclone purge "${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
-                  LATEST_ENTRY="" 
-                else
-                  ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}${ACTUAL_FILENAME}"
-                  BACKUP_DISPLAY_NAME="${LATEST_ENTRY}${ACTUAL_FILENAME}"
-                  echo "✅ 成功定位到实际备份文件: ${ACTUAL_FILENAME}"
+            if [[ -n "${LATEST_B2_BACKUP}" ]]; then
+              echo "✅ 在 B2 上发现最新备份: ${LATEST_B2_BACKUP}"
+              B2_BACKUP_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${LATEST_B2_BACKUP}"
+              
+              MAX_RETRIES=3
+              for ((i=1; i<=MAX_RETRIES; i++)); do
+                echo "🔄 (第 ${i}/${MAX_RETRIES} 次尝试) 正在从 B2 流式恢复系统..."
+                if rclone cat "${B2_BACKUP_PATH}" | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; then
+                  echo "✅ B2 备份恢复成功。"
+                  echo "restored=true" >> $GITHUB_OUTPUT
+                  break
                 fi
-              else
-                echo "ℹ️ 发现标准文件格式备份: ${LATEST_ENTRY}。"
-                ACTUAL_BACKUP_PATH="${REMOTE_BASE_PATH}/${LATEST_ENTRY}"
-                BACKUP_DISPLAY_NAME="$LATEST_ENTRY"
-              fi
-
-              if [ -n "$LATEST_ENTRY" ]; then
-                LOCAL_RESTORE_FILE="/tmp/restore_backup.download"
-                echo "✅ 准备恢复备份。正在将 '${BACKUP_DISPLAY_NAME}' 完整下载到本地..."
-                rclone copyto "${ACTUAL_BACKUP_PATH}" ${LOCAL_RESTORE_FILE} ${{ env.RCLONE_FLAGS }}
-
-                if [ ! -s "${LOCAL_RESTORE_FILE}" ]; then
-                  echo "❌ 恢复失败：下载的备份文件为空或下载失败！可能是远程文件已损坏。"
-                  LATEST_ENTRY=""
+                if [[ ${i} -lt ${MAX_RETRIES} ]]; then
+                  echo "⚠️ 第 ${i} 次恢复失败。将在 10 秒后重试..."
+                  sleep 10
                 else
-                  echo "✅ 下载完成。正在从本地文件解压（兼容.tar和.tar.gz）..."
-                  cat ${LOCAL_RESTORE_FILE} | { pigz -dc || cat; } | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                  rm -f ${LOCAL_RESTORE_FILE}
+                  echo "❌ 从 B2 恢复多次失败。"
+                fi
+              done
+            else
+              echo "ℹ️ B2 中未发现任何备份。"
+            fi
+
+            # --- WebDAV 恢复逻辑 (仅当B2恢复失败或为空时触发) ---
+            if [[ ! -f "$GITHUB_OUTPUT" || $(grep -c "restored=true" "$GITHUB_OUTPUT") -eq 0 ]]; then
+              echo "🤔 B2 中无可用备份，正在尝试从 WebDAV 回迁初始备份..."
+              rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
+              
+              if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${WEBDEV_BACKUP_FILE} > /dev/null; then
+                echo "✅ 在 WebDAV 上发现可用备份，正在恢复..."
+                # 使用临时文件确保完整性和可迁移性
+                sudo rclone copy webdav:${WEBDAV_REMOTE_PATH}/${WEBDEV_BACKUP_FILE} /tmp/
+                
+                if sudo pigz -dc /tmp/${WEBDEV_BACKUP_FILE} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; then
+                  echo "✅ WebDAV 备份恢复成功。"
+                  echo "restored=true" >> $GITHUB_OUTPUT
                   
-                  if [ ! -d "${{ env.CHROOT_DIR }}/proc" ] && [ ! -d "${{ env.CHROOT_DIR }}/bin" ]; then
-                    echo "❌ 恢复校验失败！备份文件 '$BACKUP_DISPLAY_NAME' 可能已损坏。"
-                    echo "  -> 正在从 B2 删除损坏的备份..."
-                    if [[ "$LATEST_ENTRY" == */ ]]; then rclone purge "${REMOTE_BASE_PATH}/${LATEST_ENTRY}"; else rclone deletefile "${ACTUAL_BACKUP_PATH}"; fi
-                    echo "  -> 自动转为创建新系统..."
-                    sudo rm -rf ${{ env.CHROOT_DIR }}/*
-                    sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-                    echo "restored=false" >> $GITHUB_OUTPUT
-                  else
-                    echo "✅ 恢复校验成功，系统完整。"
-                    echo "restored=true" >> $GITHUB_OUTPUT
-                  fi
+                  echo "🚀 正在将此初始备份迁移到 Backblaze B2..."
+                  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+                  B2_NEW_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
+                  cat /tmp/${WEBDEV_BACKUP_FILE} | rclone rcat ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${B2_NEW_FILENAME} --progress
+                  echo "✅ 初始备份已上传到 B2，文件名为: ${B2_NEW_FILENAME}"
+                else
+                  echo "⚠️ WebDAV 备份文件似乎已损坏，将创建全新系统。"
                 fi
+                sudo rm -f /tmp/${WEBDEV_BACKUP_FILE}
+              else
+                echo "⚠️ WebDAV 中也未发现备份。"
               fi
             fi
+          fi
 
-            if [ -z "$LATEST_ENTRY" ]; then
-              echo "⚠️ 未能成功恢复备份。将自动创建全新系统..."
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-              echo "restored=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "ℹ️ 用户选择不使用缓存。将创建全新系统..."
+          # --- 创建全新系统 (最后防线) ---
+          if [[ ! -f "$GITHUB_OUTPUT" || $(grep -c "restored=true" "$GITHUB_OUTPUT") -eq 0 ]]; then
+            echo "ℹ️ 所有缓存选项均无效。将创建全新系统..."
             sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
             echo "restored=false" >> $GITHUB_OUTPUT
           fi
@@ -157,12 +154,11 @@ jobs:
           echo "✅ 虚拟文件系统已挂载。"
 
       - name: 5. 清理 Chroot 环境空间 (Clean chroot environment)
-        if: steps.restore_or_create.outputs.restored == 'true'
         run: |
           echo "🧹 开始清理 chroot 环境内的缓存和临时文件..."
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
             echo '  -> 正在清理 apt 缓存...'; \
-            apt-get clean -y > /dev/null 2>&1 || true; \
+            apt-get clean -y > /dev/null 2>&1; \
             rm -rf /var/lib/apt/lists/*; \
             echo '  -> 正在清理临时文件...'; \
             rm -rf /tmp/* /var/tmp/*; \
@@ -170,9 +166,8 @@ jobs:
             rm -rf /root/.cache; \
             echo '✅ Chroot 环境清理完成。'"
 
-      # *** 修正：采用你提供的动态脚本生成方式 ***
       - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
-        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
+        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
         run: |
           echo "✅ 进入自动化运行模式..."
           
@@ -270,7 +265,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: ${{ env.RUN_DURATION_MINUTES }}
+          wait-timeout-minutes: 100
 
       - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
         if: always()
@@ -283,57 +278,34 @@ jobs:
           sudo umount -l "${MNT_DIR}/sys" || true
           echo "✅ 虚拟文件系统已全部卸载。"
 
-      - name: 8. 备份系统环境到 Backblaze B2 (Backup environment to Backblaze B2)
-        if: github.event.inputs.force_backup == true || !cancelled()
+      - name: 8. 备份系统环境到 Backblaze B2 并清理旧备份
+        if: ${{ !cancelled() }}
         run: |
-          echo "开始打包并上传备份到 Backblaze B2..."
-          if [ ! -d "${{ env.CHROOT_DIR }}/bin" ]; then
-            echo "❌ chroot环境无效或为空，跳过备份以防上传空文件。"
-            exit 0
-          fi
-          
-          echo "正在停止chroot内的服务（如pm2），以确保数据一致性..."
+          echo "正在停止 chroot 环境中的所有 pm2 服务..."
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
+          echo "正在配置 rclone for Backblaze B2..."
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
-          
-          BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}$(date +%Y%m%d_%H%M%S).tar.gz"
-          REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-          LOCAL_BACKUP_FILE="/tmp/${BACKUP_FILENAME}"
 
-          echo "✅ 将统一使用 pigz 进行多线程压缩..."
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE}
-
-          if [ ! -s "${LOCAL_BACKUP_FILE}" ]; then
-              echo "❌ 错误：本地备份文件创建失败或为空！中止备份。"
-              exit 1
-          fi
-          echo "✅ 本地备份文件创建成功: ${LOCAL_BACKUP_FILE}"
+          echo "开始使用 pigz 多线程流式打包并上传备份到 B2..."
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          NEW_BACKUP_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
+          B2_UPLOAD_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${NEW_BACKUP_FILENAME}"
           
-          echo "正在上传备份文件: $BACKUP_FILENAME"
-          rclone copyto ${LOCAL_BACKUP_FILE} ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 备份上传成功。"
-          sudo rm -f ${LOCAL_BACKUP_FILE}
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat "${B2_UPLOAD_PATH}" --progress
+          echo "✅ 新备份 ${NEW_BACKUP_FILENAME} 已上传至 B2。"
 
-          echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          REMOTE_FULL_PATH="${REMOTE_PATH}/"
-          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_FULL_PATH} --include "${{ env.BACKUP_PREFIX }}*" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
-          
-          if [ -n "$BACKUPS_TO_DELETE" ]; then
-            echo "🗑️ 发现以下旧备份将被清理:"
-            echo "$BACKUPS_TO_DELETE"
-            for backup_entry in $BACKUPS_TO_DELETE; do
-              if [[ "$backup_entry" == */ ]]; then
-                echo "  -> 正在删除旧版目录备份: $backup_entry ..."
-                rclone purge "${REMOTE_FULL_PATH}${backup_entry}"
-              else
-                echo "  -> 正在删除旧版文件备份: $backup_entry ..."
-                rclone deletefile "${REMOTE_FULL_PATH}${backup_entry}"
-              fi
+          echo "正在执行备份清理策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
+          BACKUP_FILES_TO_DELETE=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} | grep '${{ env.BACKUP_PREFIX }}' | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
+
+          if [[ -n "${BACKUP_FILES_TO_DELETE}" ]]; then
+            echo "将要删除以下旧备份:"
+            echo "${BACKUP_FILES_TO_DELETE}"
+            echo "${BACKUP_FILES_TO_DELETE}" | while read -r file; do
+              rclone deletefile ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/"$file"
             done
             echo "✅ 旧备份清理完毕。"
           else
-            echo "✅ 无需清理旧备份。"
+            echo "ℹ️ 无需清理旧备份。"
           fi
-          
-          echo "✅ 备份流程执行完毕。"
+          echo "✅ 备份及清理流程执行完毕。"
