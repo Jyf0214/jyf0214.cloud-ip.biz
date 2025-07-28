@@ -1,7 +1,7 @@
 # 工作流名称
-name: CI with Persistent Environment (B2 ZSTD v7 - Final Fix)
+name: CI with Persistent Environment (B2 ZSTD v8 - Final Fix)
 
-# ... (on, concurrency, env 等部分与之前版本完全相同，此处省略) ...
+# ... (on, concurrency 部分与之前版本完全相同) ...
 on:
   workflow_dispatch:
     inputs:
@@ -20,7 +20,10 @@ on:
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
+
+# 全局环境变量
 env:
+  # ... (大部分与之前相同) ...
   CHROOT_DIR: /mnt/minisys
   BACKUP_PREFIX: "minisys_backup_"
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
@@ -28,10 +31,15 @@ env:
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_BACKUP_DIR: "backup"
   BACKUP_RETENTION_COUNT: 2
+  
+  # --- [重要] 请确保以下 Secrets 已全部设置 ---
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
+  B2_BUCKET_ID: ${{ secrets.B2_BUCKET_ID }} # <-- [新增] 请在 Secrets 中添加此项
+
   PAT: ${{ secrets.PAT }}
+  # ... (其他 secrets) ...
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
@@ -39,9 +47,10 @@ env:
   NAPCATUSER: ${{ secrets.NAPCATUSER }}
   NAPCATPASS: ${{ secrets.NAPCATPASS }}
 
+
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v7)"
+    name: "Run All Services (B2 ZSTD v8)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -59,7 +68,7 @@ jobs:
       - uses: actions/setup-python@v4
         with: { python-version: "3.9" }
 
-      - name: 5. ⚡️ [决定性修复] 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
+      - name: 5. ⚡️ [最终修复] 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         run: |
           BG_LOG_FILE=$(mktemp)
@@ -70,8 +79,9 @@ jobs:
             set -eo pipefail
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
-            echo "正在配置 rclone 以连接到 Backblaze B2..."
-            rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
+            # rclone 仅用于列出文件和上传，无需配置下载链接
+            echo "正在配置 rclone (仅用于文件列表和上传)..."
+            rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
 
             B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
             echo "1. 正在 B2 存储桶 (${B2_REMOTE_PATH}) 中查找最新的备份..."
@@ -80,21 +90,18 @@ jobs:
 
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
-                REMOTE_FILE_PATH="${B2_REMOTE_PATH}/${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
 
-                # --- [决定性修复]: 使用 rclone link 生成URL, 然后用 curl 下载 ---
-                echo "   -> 正在生成最终下载链接..."
-                DOWNLOAD_URL=$(rclone link "${REMOTE_FILE_PATH}")
-                if [[ -z "$DOWNLOAD_URL" ]]; then
-                  echo "❌ 无法生成下载链接！" >&2; exit 1
-                fi
-                echo "   -> ✅ 链接已生成: ${DOWNLOAD_URL}"
+                # --- [最终修复]: 手动构建与代理兼容的 URL, 并使用 curl 下载 ---
+                DOWNLOAD_URL="https://${{ env.B2_DOWNLOAD_URL }}/file/${{ env.B2_BUCKET_NAME }}/${LATEST_BACKUP_FILENAME}"
+                echo "   -> [手动构建] 最终下载链接: ${DOWNLOAD_URL}"
                 echo "   -> 开始使用 curl 下载文件..."
+                
+                # 使用 curl: -L (跟随跳转), --fail (出错时快速失败), -o (输出到文件)
                 curl -L --fail -o "${LOCAL_BACKUP_PATH}" "${DOWNLOAD_URL}"
 
                 if [[ ! -s "${LOCAL_BACKUP_PATH}" ]]; then
-                    echo "❌ 下载失败：本地文件不存在或大小为0！" >&2
+                    echo "❌ 下载失败：本地文件不存在或大小为0！请检查 curl 命令是否成功以及 URL 是否可以访问。" >&2
                     exit 1
                 fi
                 # --- [修复结束] ---
@@ -134,7 +141,7 @@ jobs:
           echo "--- ✅ 所有并行任务完成 ---"
           if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
 
-      # ... (后续步骤 6, 7, 8A, 8B, 9, 10, 11 与 v6 版本完全相同，无需修改) ...
+      # ... (后续步骤 6 至 11 与之前版本完全相同，无需修改) ...
       - name: 6. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}
@@ -195,7 +202,7 @@ jobs:
           echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
           sleep ${RUNTIME_MINUTES}m
           echo "⏳ 规定运行时间已到。"
-      
+
       - name: 8B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
@@ -213,7 +220,7 @@ jobs:
           pm2 stop python-app || true
           
           echo "--- 1. 使用 zstd (高压缩) 创建新备份并上传到 B2 ---"
-          rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
+          rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
@@ -249,7 +256,7 @@ jobs:
             echo "无需清理，备份数量未超过保留限制 (${{ env.BACKUP_RETENTION_COUNT }})。"
           fi
 
-      - name: 11. [新增] 清理运行器残留文件
+      - name: 11. 清理运行器残留文件
         if: always()
         run: |
           echo "--- 开始清理运行器环境 ---"
