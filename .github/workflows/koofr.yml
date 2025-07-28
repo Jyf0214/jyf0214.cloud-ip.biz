@@ -20,6 +20,11 @@ on:
         required: true
         type: boolean
         default: false
+      force_backup:
+        description: '强制备份? (即使工作流失败或被取消也执行备份) (Force backup? Runs even if workflow fails or is cancelled)'
+        required: true
+        type: boolean
+        default: false
 
 # 全局环境变量
 env:
@@ -231,8 +236,8 @@ jobs:
           echo "✅ 虚拟文件系统已全部卸载。"
 
       - name: 8. 备份系统环境到 Backblaze B2 (Backup environment to Backblaze B2)
-        # 仅在工作流未被取消时执行
-        if: ${{ !cancelled() }}
+        # 如果用户选择强制备份，则总是运行。否则，仅在工作流未被取消时运行。
+        if: github.event.inputs.force_backup == true || !cancelled()
         run: |
           echo "开始使用 pigz 多线程流式打包并上传备份到 Backblaze B2..."
           # 停止 chroot 环境中的所有 pm2 服务以确保数据一致性
