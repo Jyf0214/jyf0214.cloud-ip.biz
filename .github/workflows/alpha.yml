@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Versioned Backups - B2 ZSTD v4)
+name: CI with Persistent Environment (Versioned Backups - B2 ZSTD v5 - Download URL Fix)
 
 # 工作流触发器
 on:
@@ -34,15 +34,16 @@ env:
   BACKUP_PREFIX: "minisys_backup_"
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
 
-  # --- [新增] Backblaze B2 备份配置 ---
+  # --- Backblaze B2 备份配置 ---
   B2_REMOTE_NAME: "b2_backup_destination"
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_BACKUP_DIR: "backup"
   BACKUP_RETENTION_COUNT: 2 # 在 B2 上保留的备份数量
 
-  # --- [新增] Backblaze B2 Secrets ---
+  # --- Backblaze B2 Secrets ---
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # 下载代理链接
   
   # --- 应用与服务 Secrets ---
   PAT: ${{ secrets.PAT }}
@@ -55,7 +56,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v4)"
+    name: "Run All Services (B2 ZSTD v5)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -85,7 +86,10 @@ jobs:
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             echo "正在配置 rclone 以连接到 Backblaze B2..."
-            rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
+            
+            # --- [关键修复] ---
+            # 在 rclone 配置中明确指定 download_url，强制使用代理链接下载
+            rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
 
             B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
             echo "1. 正在 B2 存储桶 (${B2_REMOTE_PATH}) 中查找最新的备份 (优先 .zst, 其次 .gz)..."
@@ -95,7 +99,8 @@ jobs:
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
-                echo "   -> 开始从 B2 下载文件..."
+                echo "   -> 开始从 B2 下载文件 (使用指定的下载链接)..."
+                # 使用 copyto 下载单个文件
                 rclone copyto "${B2_REMOTE_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
                 echo "--- [后台任务] ✅ 下载完成。开始解压..."
                 
@@ -174,7 +179,8 @@ jobs:
           pm2 stop python-app || true
           
           echo "--- 1. 使用 zstd (高压缩) 创建新备份并上传到 B2 ---"
-          rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
+          # 同样在此处加入 download_url，保持配置一致性
+          rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
@@ -184,7 +190,7 @@ jobs:
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat ${B2_REMOTE_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
 
-          echo "--- 2. [新增] 校验备份文件大小是否超过 4.5 GB ---"
+          echo "--- 2. 校验备份文件大小是否超过 4.5 GB ---"
           MAX_SIZE_BYTES=4831838208 # 4.5 GiB
           UPLOADED_SIZE_BYTES=$(rclone size --json "${B2_REMOTE_PATH}/${NEW_BACKUP_FILE}" | jq '.bytes')
 
@@ -198,7 +204,6 @@ jobs:
           fi
 
           echo "--- 3. 清理 B2 上的旧备份 (保留 ${{ env.BACKUP_RETENTION_COUNT }} 个最新) ---"
-          # 安全地将 bash 变量传递给 jq
           FILES_TO_DELETE=$(rclone lsjson ${B2_REMOTE_PATH}/ | \
                               jq --argjson count "${{ env.BACKUP_RETENTION_COUNT }}" -r \
                               '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-$count][] | .Name' 2>/dev/null)
