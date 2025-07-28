@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Backblaze B2 Backups - v6 Centralized Config)
+name: CI with Persistent Environment (Backblaze B2 Backups - v7 Chroot Env Fix)
 
 # 工作流触发器
 on:
@@ -19,7 +19,6 @@ on:
       run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
 
-
 # 并发控制
 concurrency:
   group: ${{ github.workflow }}
@@ -27,19 +26,18 @@ concurrency:
 
 # ========================================================================================
 # --- 全局环境变量 (集中管理所有配置和密钥) ---
-# 备注: 将所有密钥在此处声明是应用户要求，以方便管理。
-#       更安全的实践是将密钥范围限定在需要它们的特定步骤(step)中。
 # ========================================================================================
 env:
   # --- 基础路径和配置 ---
   CHROOT_DIR: /mnt/minisys
   PYTHON_APP_REPO_DIR: chatgpt-on-wechat
+  NODE_VERSION: '18'  # 定义Node.js版本
 
   # --- Backblaze B2 备份配置 ---
-  B2_REMOTE_NAME: b2                                       # Rclone 远程的名称
-  BACKUP_PREFIX: minisys_backup_                           # 备份文件名前缀
-  B2_BACKUP_DIR: backup                                    # 在 B2 存储桶中新建的备份子目录
-  BACKUP_RETENTION_COUNT: 3                                # 每个备份位置要保留的最新备份数量
+  B2_REMOTE_NAME: b2
+  BACKUP_PREFIX: minisys_backup_
+  B2_BACKUP_DIR: backup
+  BACKUP_RETENTION_COUNT: 3
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
 
   # --- GitHub & App Secrets (由此处统一注入) ---
@@ -57,10 +55,9 @@ env:
   NAPCATUSER: ${{ secrets.NAPCATUSER }}
   NAPCATPASS: ${{ secrets.NAPCATPASS }}
 
-
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 Enhanced v6)"
+    name: "Run All Services (B2 Enhanced v7)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -72,15 +69,16 @@ jobs:
       - name: 3. 安装全部所需依赖 (zstd, pigz, rclone)
         run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
 
-      - name: 4. 设置 Python 和 Node.js 环境
+      - name: 4. 设置运行器的 Node.js 和 Python 环境
         uses: actions/setup-node@v3
-        with: { node-version: '18' }
+        with: { node-version: '${{ env.NODE_VERSION }}' }
       - uses: actions/setup-python@v4
         with: { python-version: "3.9" }
 
       - name: 5. ⚡️ 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         run: |
+          # ... 此步骤内容无变化 ...
           BG_LOG_FILE=$(mktemp)
           echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
 
@@ -140,7 +138,7 @@ jobs:
           MNT_DIR=${{ env.CHROOT_DIR }}
           sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
 
-      - name: 7. [增强] 清理 Chroot 环境空间
+      - name: 7A. [增强] 清理 Chroot 环境空间
         if: steps.restore_or_create.outputs.restored == 'true'
         run: |
           echo "--- 开始深度清理 Chroot 环境 ---"
@@ -157,14 +155,54 @@ jobs:
             echo '✅ Chroot 环境清理完成。'
           "
 
+      - name: 7B. [修复] 安装 Chroot 环境内的 Node.js 和 PM2
+        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
+        run: |
+          echo "--- [Chroot Prep] 开始在 Chroot 环境中安装 Node.js 和 PM2 ---"
+          # 动态生成要在 chroot 内部执行的脚本
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh > /dev/null << EOF
+          #!/bin/bash
+          set -ex
+          
+          echo '1. 配置 DNS (解决 apt 可能无法解析域名的问题)...'
+          echo "nameserver 8.8.8.8" > /etc/resolv.conf
+          echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
+          echo '2. 检查并安装基础依赖 (curl, ca-certificates)...'
+          apt-get update -y
+          apt-get install -y curl ca-certificates
+          
+          echo '3. 检查并安装 Node.js (v${{ env.NODE_VERSION }})...'
+          if ! command -v node &> /dev/null; then
+            echo '   -> Node.js 未找到, 开始从 NodeSource 安装...'
+            curl -fsSL https://deb.nodesource.com/setup_${{ env.NODE_VERSION }}.x | bash -
+            apt-get install -y nodejs
+          else
+            echo "   -> Node.js 已存在, 版本: \$(node -v)"
+          fi
+
+          echo '4. 检查并全局安装 PM2...'
+          if ! command -v pm2 &> /dev/null; then
+            echo '   -> PM2 未找到, 开始使用 npm 全局安装...'
+            npm install -g pm2
+          else
+            echo '   -> PM2 已存在。'
+          fi
+
+          echo '✅ Node.js 和 PM2 环境准备就绪。'
+          rm -f /tmp/prepare_env.sh
+          EOF
+          
+          # 赋予执行权限并执行脚本
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/prepare_env.sh
+
       - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
-          # 此步骤所需的所有 Secrets 均已从全局 env 继承
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # 使用 tee 和 here-document 创建启动脚本, 并将 secrets 安全地传递进去
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
           #!/bin/bash
           set -e
@@ -187,7 +225,7 @@ jobs:
           HOME_DIR="/root"
 
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
+          # !!! 注意: 下面这行检查和安装PM2的命令已被移除, 因为步骤7B已确保PM2存在 !!!
           echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
           
           if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
@@ -214,10 +252,12 @@ jobs:
         with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
 
       - name: 9. 卸载虚拟文件系统
+        # ... 此步骤内容无变化 ...
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
       - name: 10. ⚡️ [极速] 创建双备份 (根目录 + backup/) 到 B2 并清理旧版本
+        # ... 此步骤内容无变化 ...
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
           echo "--- 准备创建备份 ---"
@@ -263,6 +303,7 @@ jobs:
           done
 
       - name: 11. [新增] 清理运行器残留文件
+        # ... 此步骤内容无变化 ...
         if: always()
         run: |
           echo "--- 开始清理运行器环境 ---"
