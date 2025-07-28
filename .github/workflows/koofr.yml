@@ -31,7 +31,7 @@ env:
   # --- 基础路径和配置 ---
   CHROOT_DIR: /mnt/minisys
   PYTHON_APP_REPO_DIR: chatgpt-on-wechat
-  NODE_VERSION: '18'  # 定义Node.js版本
+  NODE_VERSION: '21'  # 定义Node.js版本
 
   # --- Backblaze B2 备份配置 ---
   B2_REMOTE_NAME: b2
