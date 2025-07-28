@@ -1,12 +1,12 @@
 # 工作流名称
-name: CI with Persistent Environment (B2 ZSTD v12 - Official B2 CLI)
+name: CI with Persistent Environment (B2 ZSTD v13 - Correct B2 CLI v3 Syntax)
 
 # ... (on, concurrency, 部分与之前版本完全相同) ...
 on:
   workflow_dispatch:
     inputs:
       create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: true }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
+      run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required:true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
@@ -44,7 +44,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v12)"
+    name: "Run All Services (B2 ZSTD v13)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -58,7 +58,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y debootstrap rclone pigz zstd jq bc curl python3-pip
           pip install --upgrade pip
-          pip install b2
+          pip install 'b2>=3.0.0'
 
       - name: 4. 设置环境
         uses: actions/setup-node@v3
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/setup-python@v4
         with: { python-version: "3.9" }
 
-      - name: 5. ⚡️ [全新方案] 使用官方 B2 CLI 恢复 Chroot (后台)
+      - name: 5. ⚡️ [v13 修复] 使用官方 B2 CLI v3 恢复 Chroot (后台)
         id: restore_or_create
         run: |
           BG_LOG_FILE=$(mktemp)
@@ -77,28 +77,28 @@ jobs:
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
 
-            # --- [v12 全新方案]: 使用 B2 官方 CLI ---
-            echo "1. 使用 B2 官方 CLI 授权..."
-            b2 authorize-account "${{ env.B2_ACCOUNT_ID }}" "${{ env.B2_ACCOUNT_KEY }}"
+            # --- [v13 修复]: 使用 B2 CLI v3+ 的正确语法 ---
+            echo "1. 使用 B2 CLI 授权..."
+            b2 account authorize "${{ env.B2_ACCOUNT_ID }}" "${{ env.B2_ACCOUNT_KEY }}"
 
-            echo "2. 使用 B2 CLI 查找最新的备份文件..."
-            LATEST_BACKUP_FULL_PATH=$(b2 list-file-names "${{ env.B2_BUCKET_NAME }}" --prefix "${{ env.B2_BACKUP_DIR }}/" --json | \
-                                      jq -r --arg prefix "${{ env.B2_BACKUP_DIR }}/${{ env.BACKUP_PREFIX }}" \
-                                      '[.files[] | select(.fileName | startswith($prefix))] | sort_by(.uploadTimestamp) | .[-1].fileName' 2>/dev/null)
+            echo "2. 使用 'b2 ls' (新命令) 查找最新的备份文件..."
+            B2_LS_PATH="${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/"
+            LATEST_BACKUP_FULL_PATH=$(b2 ls --long --json "${B2_LS_PATH}" | \
+                                      jq -r --arg prefix "${{ env.BACKUP_PREFIX }}" \
+                                      '[.[] | select(.fileName | contains($prefix))] | sort_by(.uploadTimestamp) | .[-1].fileName' 2>/dev/null)
+
 
             if [[ -n "$LATEST_BACKUP_FULL_PATH" && "$LATEST_BACKUP_FULL_PATH" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FULL_PATH}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
 
-                # 3. 使用 B2 CLI 获取带授权的下载链接
                 echo "   -> 正在从 B2 官方获取预签名授权链接..."
-                OFFICIAL_PRESIGNED_URL=$(b2 get-download-url-with-auth "${{ env.B2_BUCKET_NAME }}" "${LATEST_BACKUP_FULL_PATH}")
+                OFFICIAL_PRESIGNED_URL=$(b2 get-download-url-with-auth "${B2_BUCKET_NAME}" "${LATEST_BACKUP_FULL_PATH}")
                 if [[ -z "$OFFICIAL_PRESIGNED_URL" ]]; then
                   echo "❌ 无法从 B2 CLI 获取预签名链接！" >&2; exit 1
                 fi
                 echo "   -> ✅ 成功获取官方链接。"
 
-                # 4. 将官方链接中的域名替换为您的代理域名
                 PROXY_DOMAIN_RAW="${{ env.B2_DOWNLOAD_URL }}"
                 CLEANED_DOMAIN="${PROXY_DOMAIN_RAW#*//}"
                 CLEANED_DOMAIN="${CLEANED_DOMAIN%/}"
@@ -148,7 +148,6 @@ jobs:
           echo "--- ✅ 所有并行任务完成 ---"
           if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
 
-      # ... (后续步骤 6 至 9 与之前版本完全相同) ...
       - name: 6. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}
@@ -170,6 +169,7 @@ jobs:
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
+          # (内容与之前一致)
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
           #!/bin/bash
@@ -214,14 +214,15 @@ jobs:
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
-      - name: 10. ⚡️ [极速] 使用 rclone 创建备份并清理旧版本
+      - name: 10. ⚡️ [v13 修复] 使用 rclone 上传 & 使用 B2 CLI 清理
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
           echo "--- 停止相关服务 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
-          # rclone 用于上传
-          echo "--- 1. 使用 zstd (高压缩) 创建新备份并上传到 B2 ---"
+
+          # rclone 用于上传 (性能好)
+          echo "--- 1. 使用 rclone 创建新备份并上传到 B2 ---"
           rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
@@ -231,13 +232,15 @@ jobs:
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat ${B2_REMOTE_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
           
-          # B2 CLI 用于清理
-          echo "--- 3. 清理 B2 上的旧备份 (保留 ${{ env.BACKUP_RETENTION_COUNT }} 个最新) ---"
-          b2 authorize-account "${{ env.B2_ACCOUNT_ID }}" "${{ env.B2_ACCOUNT_KEY }}"
-          # 获取所有相关备份文件，并按时间排序
-          BACKUP_FILES_JSON=$(b2 list-file-versions "${{ env.B2_BUCKET_NAME }}" --prefix "${{ env.B2_BACKUP_DIR }}/" --json | \
-                                jq --arg prefix "${{ env.B2_BACKUP_DIR }}/${{ env.BACKUP_PREFIX }}" \
-                                '[.files[] | select(.fileName | startswith($prefix))] | sort_by(.uploadTimestamp)')
+          # B2 CLI 用于清理 (命令准确)
+          echo "--- 2. 使用 B2 CLI 清理旧备份 (保留 ${{ env.BACKUP_RETENTION_COUNT }} 个最新) ---"
+          b2 account authorize "${{ env.B2_ACCOUNT_ID }}" "${{ env.B2_ACCOUNT_KEY }}"
+          B2_LS_PATH="${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/"
+          
+          # 使用 'b2 ls --versions' (新命令) 获取所有版本
+          BACKUP_FILES_JSON=$(b2 ls --long --versions --json "${B2_LS_PATH}" | \
+                                jq --arg prefix "${{ env.BACKUP_PREFIX }}" \
+                                '[.[] | select(.fileName | contains($prefix))] | sort_by(.uploadTimestamp)')
           
           FILES_TO_DELETE_COUNT=$(echo "${BACKUP_FILES_JSON}" | jq '. | length - ${{ env.BACKUP_RETENTION_COUNT }}')
 
