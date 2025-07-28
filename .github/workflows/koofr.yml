@@ -84,9 +84,23 @@ jobs:
             LATEST_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort -r | head -n 1)
             
             if [ -n "$LATEST_BACKUP" ]; then
-              echo "✅ 发现最新备份: $LATEST_BACKUP。正在使用 pigz 多线程流式恢复系统..."
+              echo "✅ 发现最新备份: $LATEST_BACKUP。正在流式恢复系统..."
               rclone cat ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/$LATEST_BACKUP ${{ env.RCLONE_FLAGS }} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-              echo "restored=true" >> $GITHUB_OUTPUT
+              
+              # *** 健壮性增强：验证恢复是否完整 ***
+              if [ ! -d "${{ env.CHROOT_DIR }}/proc" ] || [ ! -d "${{ env.CHROOT_DIR }}/bin" ]; then
+                echo "❌ 恢复校验失败！备份文件 '$LATEST_BACKUP' 可能已损坏。"
+                echo "  -> 正在从 B2 删除损坏的备份文件..."
+                rclone deletefile ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/$LATEST_BACKUP
+                echo "  -> 自动转为创建新系统..."
+                # 清理不完整的恢复内容
+                sudo rm -rf ${{ env.CHROOT_DIR }}/*
+                sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+                echo "restored=false" >> $GITHUB_OUTPUT
+              else
+                echo "✅ 恢复校验成功，系统完整。"
+                echo "restored=true" >> $GITHUB_OUTPUT
+              fi
             else
               echo "⚠️ 未发现云端备份 (B2)。将自动转为创建新系统..."
               sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
@@ -239,7 +253,12 @@ jobs:
         # 如果用户选择强制备份，则总是运行。否则，仅在工作流未被取消时运行。
         if: github.event.inputs.force_backup == true || !cancelled()
         run: |
-          echo "开始使用 pigz 多线程流式打包并上传备份到 Backblaze B2..."
+          # *** 核心修正：先打包到本地，再上传，确保文件完整性 ***
+          echo "正在创建本地压缩包以确保文件完整性..."
+          LOCAL_BACKUP_FILE="/tmp/backup-$(date +%s).tar.gz"
+          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c > ${LOCAL_BACKUP_FILE}
+          echo "✅ 本地压缩包创建成功: ${LOCAL_BACKUP_FILE}"
+
           # 停止 chroot 环境中的所有 pm2 服务以确保数据一致性
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           
@@ -249,12 +268,13 @@ jobs:
           REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
 
           echo "正在上传备份文件: $BACKUP_FILENAME"
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
+          rclone copy ${LOCAL_BACKUP_FILE} ${REMOTE_PATH}/${BACKUP_FILENAME} ${{ env.RCLONE_FLAGS }}
           echo "✅ 备份上传成功。"
 
+          # 清理本地临时文件
+          rm -f ${LOCAL_BACKUP_FILE}
+
           echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          # *** 代码修正处 ***
-          # 使用 --include 代替错误的 --filter 来匹配文件名
           BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
           
           if [ -n "$BACKUPS_TO_DELETE" ]; then
