@@ -62,7 +62,7 @@ jobs:
           B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
           B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
           # --- Other Secrets ---
-          PAT: ${{ secrets.PAT }}
+          PAT: ${{ secrets.YUNZAIBOT_PAT }}
         run: |
           BG_LOG_FILE=$(mktemp)
           echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
