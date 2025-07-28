@@ -64,6 +64,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           echo "✅ 清理完成，当前可用空间："
           df -h /
+          sudo sh -c 'echo Jyf0214 > /etc/hostname && hostname -F /etc/hostname'
+          sudo sed -i 's/pkrvmpptgkbjq6m/Jyf0214/g' /etc/hosts
+          exec bash
 
       - name: 2. 安装所需依赖 (Install dependencies)
         run: |
