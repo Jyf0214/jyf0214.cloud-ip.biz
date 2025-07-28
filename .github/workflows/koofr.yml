@@ -1,316 +1,133 @@
 # 工作流名称
-name: CI with Persistent Chroot Environment (B2 Enhanced)
+name: Sync Backup from WebDAV to B2 (Corrected)
 
 # 工作流触发器：手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
     inputs:
-      use_cache:
-        description: '是否启用恢复缓存 (Restore from backup?)'
+      b2_bucket_name:
+        description: '您的 Backblaze B2 存储桶名称'
         required: true
-        type: boolean
-        default: true
-      run_startup_script:
-        description: '是否自动执行启动脚本 (Auto-run startup script?)'
+      webdav_backup_path:
+        description: 'WebDAV 上的备份文件存放目录'
         required: true
-        type: boolean
-        default: true
-      enable_ssh:
-        description: '是否启用SSH手动调试 (Enable SSH for manual debug?)'
+        default: 'backup'
+      webdav_backup_filename:
+        description: 'WebDAV 上的备份文件名称'
         required: true
-        type: boolean
-        default: false
+        default: 'minisys_backup.tar.gz'
 
 # 全局环境变量
 env:
-  # --- Chroot 和通用配置 ---
-  CHROOT_DIR: /mnt/minisys
-  RUN_DURATION_MINUTES: 300
-  
-  # --- Backblaze B2 备份配置 ---
-  B2_REMOTE_NAME: b2         # rclone 远程的名称
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_BACKUP_DIR: backup      # B2 存储桶内的目录
-  BACKUP_PREFIX: minisys_backup_ # 备份文件前缀
-  BACKUP_RETENTION_COUNT: 2  # 在 B2 上保留的备份数量
+  # --- WebDAV 源配置 ---
+  WEBDAV_REMOTE_NAME: origin_webdav
+  WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+
+  # --- Backblaze B2 目标配置 ---
+  B2_REMOTE_NAME: destination_b2
+  B2_BUCKET_NAME: ${{ github.event.inputs.b2_bucket_name }}
+  B2_BACKUP_DIR: backup
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # B2 下载代理 URL (必须使用)
-  
-  # --- WebDAV 备份配置 (仅用于首次迁移) ---
-  WEBDAV_REMOTE_PATH: "backup"
-  WEBDAV_BACKUP_FILE: minisys_backup.tar.gz
-  
-  # --- Chroot 环境内应用密钥 ---
-  LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
-  LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
-  LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
-  LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # B2 的免费下载 URL
+
+  # --- 备份管理配置 ---
+  BACKUP_PREFIX: minisys_backup_
+  BACKUP_RETENTION_COUNT: 2 # 在 B2 上保留的备份数量
 
 # 作业定义
 jobs:
-  build-and-debug:
+  transfer-backup-to-b2:
     # 运行环境
     runs-on: ubuntu-latest
 
     # 作业步骤
     steps:
-      - name: 1. 最大化运行器磁盘空间 (Maximize runner disk space)
+      - name: 1. 安装 rclone
         run: |
-          echo "清理前，初始磁盘空间："
-          df -h /
-          echo "开始清理预装软件以释放空间..."
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          echo "✅ 清理完成，当前可用空间："
-          df -h /
-
-      - name: 2. 安装所需依赖 (Install dependencies)
-        run: |
-          echo "正在安装 debootstrap, rclone 和 pigz (用于多线程压缩)..."
+          echo "正在安装 rclone..."
           sudo apt-get update
-          sudo apt-get install -y debootstrap rclone pigz
-          echo "✅ 依赖安装完毕。"
+          sudo apt-get install -y rclone
+          echo "✅ rclone 安装完毕。"
 
-      - name: 3. [B2] 恢复备份或创建新系统 (Restore from B2 or Create)
-        id: restore_or_create
-        env:
-          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-          WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+      - name: 2. 配置 rclone 远程存储 (Corrected)
         run: |
-          sudo mkdir -p ${{ env.CHROOT_DIR }}
+          echo "正在配置 WebDAV 和 Backblaze B2 的 rclone 远程..."
           
-          # 如果用户禁用了缓存，则直接创建新系统
-          if [[ "${{ github.event.inputs.use_cache }}" == "false" ]]; then
-            echo "ℹ️ 用户选择不使用缓存。将创建全新系统..."
-            sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-            echo "restored=false" >> $GITHUB_OUTPUT
+          # 配置 WebDAV 源
+          rclone config create ${{ env.WEBDAV_REMOTE_NAME }} webdav \
+            url="${{ env.WEBDAV_URL }}" \
+            vendor=other \
+            user="${{ env.WEBDAV_USER }}" \
+            pass="${{ env.WEBDAV_PASS }}"
+
+          # 配置 Backblaze B2 目标
+          # **关键修正**: 移除了错误的 'endpoint' 参数，
+          # 使用 'download_url' 参数来指定免费下载链接，
+          # rclone 会自动处理标准的上传/管理API端点。
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
+            account="${{ env.B2_ACCOUNT_ID }}" \
+            key="${{ env.B2_ACCOUNT_KEY }}" \
+            download_url="${{ env.B2_DOWNLOAD_URL }}"
+
+          echo "✅ rclone 远程配置完成。"
+          echo "当前 rclone 远程列表："
+          rclone listremotes
+
+      - name: 3. 转移备份文件到 B2
+        id: transfer
+        run: |
+          WEBDAV_PATH="${{ env.WEBDAV_REMOTE_NAME }}:${{ github.event.inputs.webdav_backup_path }}"
+          FILENAME="${{ github.event.inputs.webdav_backup_filename }}"
+          
+          echo "🔎 正在检查源文件 ${WEBDAV_PATH}/${FILENAME} 是否存在..."
+          if ! rclone lsf "${WEBDAV_PATH}" | grep -q "^${FILENAME}$"; then
+            echo "❌ 错误：在 WebDAV 源上未找到指定的备份文件！"
+            exit 1
+          fi
+
+          TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
+          B2_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
+          B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${B2_FILENAME}"
+
+          echo "🚀 准备就绪，正在从 WebDAV 传输文件到 Backblaze B2..."
+          echo "   -> 源: ${WEBDAV_PATH}/${FILENAME}"
+          echo "   -> 目标: ${B2_FULL_PATH}"
+
+          # rcat 流式传输，不占用本地磁盘空间。上传操作会使用标准的B2 API。
+          rclone rcat "${WEBDAV_PATH}/${FILENAME}" "${B2_FULL_PATH}" --progress
+          
+          echo "✅ 文件成功传输到 B2！"
+          echo "b2_remote_path=${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}" >> $GITHUB_OUTPUT
+
+      - name: 4. 清理 B2 上的旧备份
+        # 这个步骤仅在成功时执行
+        if: success()
+        run: |
+          B2_PATH="${{ steps.transfer.outputs.b2_remote_path }}"
+          if [ -z "$B2_PATH" ]; then
+            echo "⚠️ 未获取到 B2 路径，跳过清理步骤。"
             exit 0
           fi
           
-          echo "🔎 用户选择启用缓存。正在配置 rclone for B2..."
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
-            account "${{ env.B2_ACCOUNT_ID }}" \
-            key "${{ env.B2_ACCOUNT_KEY }}"
+          echo "🧹 开始清理 Backblaze B2 上的旧备份..."
+          echo "    目标路径: ${B2_PATH}"
+          echo "    保留数量: ${{ env.BACKUP_RETENTION_COUNT }}"
           
-          echo "🔄 正在检查 Backblaze B2 上的最新备份..."
-          # 获取 B2 中最新的备份文件
-          LATEST_B2_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --b2-download-url "${{ env.B2_DOWNLOAD_URL }}" | grep "${{ env.BACKUP_PREFIX }}" | sort -r | head -n 1)
+          # 使用 rclone delete 配合 --min-age 来删除除了最新的 N 个备份之外的所有文件
+          # 这个命令会列出所有匹配前缀的备份文件，然后按时间倒序排序，
+          # 跳过最新的几个，然后删除其余的。
+          rclone delete "${B2_PATH}" \
+            --include "${{ env.BACKUP_PREFIX }}*.tar.gz" \
+            --min-age 1s \
+            --dry-run # 首先进行演练，确认要删除的文件
           
-          if [[ -n "${LATEST_B2_BACKUP}" ]]; then
-            echo "✅ 发现 B2 备份: ${LATEST_B2_BACKUP}。将带重试机制进行下载..."
-            B2_FILE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${LATEST_B2_BACKUP}"
-            
-            # 带3次重试的下载循环
-            success=false
-            for i in {1..3}; do
-              echo "  -> 尝试第 $i 次下载..."
-              if rclone cat "${B2_FILE_PATH}" --b2-download-url "${{ env.B2_DOWNLOAD_URL }}" --progress | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; then
-                echo "✅ B2 备份恢复成功。"
-                success=true
-                break
-              else
-                echo "⚠️ 下载失败。将在 5 秒后重试..."
-                sleep 5
-              fi
-            done
+          # 正式执行删除
+          rclone delete "${B2_PATH}" \
+            --include "${{ env.BACKUP_PREFIX }}*.tar.gz" \
+            --min-age 1s -v # 正式删除并显示详细过程
 
-            if ! $success; then
-              echo "❌ 从 B2 恢复备份彻底失败！将尝试创建全新系统。"
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-              echo "restored=false" >> $GITHUB_OUTPUT
-            else
-              echo "restored=true" >> $GITHUB_OUTPUT
-            fi
-            
-          else
-            echo "⚠️ 在 B2 未发现备份。将尝试从旧的 WebDAV 迁移..."
-            rclone config create webdav webdav url="${WEBDAV_URL}" vendor=other user="${WEBDAV_USER}" pass="${WEBDAV_PASS}"
-            
-            if rclone lsf webdav:${WEBDAV_REMOTE_PATH}/${WEBDAV_BACKUP_FILE} > /dev/null; then
-              echo "✅ 发现 WebDAV 备份。正在使用它来“播种”系统..."
-              rclone cat webdav:${WEBDAV_REMOTE_PATH}/${WEBDAV_BACKUP_FILE} | pigz -dc | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-              echo "✅ WebDAV 备份已恢复。在工作流结束时，此系统状态将被上传到 B2。"
-              echo "restored=true" >> $GITHUB_OUTPUT
-            else
-              echo "⚠️ WebDAV 上也未发现备份。将自动转为创建新系统..."
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
-              echo "restored=false" >> $GITHUB_OUTPUT
-            fi
-          fi
-
-      - name: 4. 挂载虚拟文件系统到 Chroot 环境 (Mount virtual filesystems)
-        run: |
-          echo "正在挂载虚拟文件系统..."
-          MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo mount -t proc proc "${MNT_DIR}/proc"
-          sudo mount -o bind /dev "${MNT_DIR}/dev"
-          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
-          sudo mount -o bind /sys "${MNT_DIR}/sys"
-          echo "✅ 虚拟文件系统已挂载。"
-
-      - name: 5. 清理 Chroot 环境空间 (Clean chroot environment)
-        run: |
-          echo "🧹 开始清理 chroot 环境内的缓存和临时文件..."
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
-            echo '  -> 正在清理 apt 缓存...'; \
-            apt-get clean -y > /dev/null 2>&1; \
-            rm -rf /var/lib/apt/lists/*; \
-            echo '  -> 正在清理临时文件...'; \
-            rm -rf /tmp/* /var/tmp/*; \
-            echo '  -> 正在清理 /root 目录下的缓存...'; \
-            rm -rf /root/.cache; \
-            echo '✅ Chroot 环境清理完成。'"
-
-      - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
-        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
-        run: |
-          echo "✅ 进入自动化运行模式..."
-          
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
-          #!/bin/bash
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
-          HOME_DIR="/root"
-
-          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          
-          if ! command -v pm2 &> /dev/null; then
-              echo "  -> PM2 未安装，将使用 npm 全局安装..."
-              npm install -g pm2
-          fi
-          
-          echo "1. 正在清理旧的日志文件..."
-          pm2 flush
-          find \${HOME_DIR} -name "*.log" -type f -delete
-          echo "  -> 日志已清理。"
-
-          echo "2. 正在尝试使用 PM2 启动 launcher.sh..."
-          if [ -f "\${HOME_DIR}/launcher.sh" ]; then
-              cd "\${HOME_DIR}"
-              pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"
-          else
-              echo "  -> 警告: \${HOME_DIR}/launcher.sh 未找到，跳过。"
-          fi
-          
-          echo "3. 正在启动 Redis 服务器..."
-          if command -v redis-server &> /dev/null; then
-              redis-server --daemonize yes
-          else
-              echo "  -> 警告: redis-server 命令未找到，跳过。"
-          fi
-          
-          echo "4. 正在尝试启动 Yunzai-Bot..."
-          YUNZAI_DIR="\${HOME_DIR}/Yunzai"
-          if [ -d "\${YUNZAI_DIR}" ]; then
-              cd "\${YUNZAI_DIR}"
-              pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"
-          else
-              echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
-          fi
-
-          echo "5. 正在尝试启动 loophole 服务..."
-          LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
-          if [ -f "\${LOOPHOLE_APP}" ]; then
-              cd "\${HOME_DIR}/loophole"
-              # 启动 loophole webdav
-              pm2 start ./loophole --name "loophole-webdav" -- \
-                webdav ~ -u "${{ env.LOOPHOLE_WEBDAV_USER }}" -p "${{ env.LOOPHOLE_WEBDAV_PASS }}" --hostname "${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}"
-              
-              # 启动 loophole http
-              pm2 start ./loophole --name "loophole-http" -- \
-                http 6099 --hostname "${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}"
-          else
-              echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
-          fi
-
-          echo "6. 正在尝试启动 openlist server..."
-          OPENLIST_APP="\${HOME_DIR}/openlist"
-          if [ -f "\${OPENLIST_APP}" ]; then
-              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
-              cd "\${HOME_DIR}"
-              pm2 start ./openlist --name "openlist-server" -- server
-          else
-              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
-          fi
-
-          echo "7. 正在尝试启动 ChmlFrp 服务..."
-          FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
-          if [ -f "\${FRPC_APP}" ]; then
-              echo "  -> 找到 \${FRPC_APP}，正在启动服务..."
-              cd "\${HOME_DIR}/ChmlFrp"
-              pm2 start ./frpc --name "chml-frp" -- -c frpc.ini
-          else
-              echo "  -> 警告: \${FRPC_APP} 未找到，跳过。"
-          fi
-          
-          echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
-          pm2 save
-          pm2 ls
-          EOF
-
-          echo "赋予启动脚本执行权限并执行..."
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-
-          echo "🚀 服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
-          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
-          echo "⏳ 规定运行时间已到。"
-
-      - name: 6B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
-        # 仅在用户选择启用 SSH 时运行
-        if: github.event.inputs.enable_ssh == 'true'
-        uses: lhotari/action-upterm@v1
-        with:
-          limit-access-to-actor: true
-          wait-timeout-minutes: 100
-
-      - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
-        # 无论之前的步骤是否成功，都执行此步骤
-        if: always()
-        run: |
-          echo "会话结束。为安全备份，正在卸载所有虚拟文件系统..."
-          MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo umount -l "${MNT_DIR}/dev/pts" || true
-          sudo umount -l "${MNT_DIR}/dev" || true
-          sudo umount -l "${MNT_DIR}/proc" || true
-          sudo umount -l "${MNT_DIR}/sys" || true
-          echo "✅ 虚拟文件系统已全部卸载。"
-
-      - name: 8. [B2] 备份系统环境到 Backblaze B2 (Backup to B2)
-        # 仅在工作流未被取消时执行
-        if: ${{ !cancelled() }}
-        run: |
-          echo "准备备份到 Backblaze B2..."
-          
-          # 停止 chroot 环境中的所有 pm2 服务以保证数据一致性
-          echo "  -> 正在停止 Chroot 环境中的 PM2 服务..."
-          sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
-          
-          # 配置 rclone (如果之前的步骤失败可能需要重新配置)
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
-            account "${{ env.B2_ACCOUNT_ID }}" \
-            key "${{ env.B2_ACCOUNT_KEY }}"
-
-          # 创建带时间戳的新备份文件名
-          TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
-          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
-          
-          echo "🚀 开始使用 pigz 多线程流式打包并上传备份: ${NEW_BACKUP_FILE}"
-          sudo tar -cpf - -C ${{ env.CHROOT_DIR }} . | pigz -c | rclone rcat \
-            ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${NEW_BACKUP_FILE} --progress
-          echo "✅ 备份上传成功。"
-          
-          echo "🧹 开始执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          # 列出所有备份文件，按名称排序（因时间戳格式，即按时间排序），跳过最新的N个，然后删除其余的
-          rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} | \
-            grep "${{ env.BACKUP_PREFIX }}" | \
-            sort -r | \
-            sed -n '${{ env.BACKUP_RETENTION_COUNT }},$p' | \
-            while read -r file_to_delete; do
-              if [[ -n "$file_to_delete" ]]; then
-                echo "  -> 正在删除旧备份: $file_to_delete"
-                rclone deletefile ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/"$file_to_delete"
-              fi
-            done
-          
-          echo "✅ 备份清理完成。"
+          echo "✅ 旧备份清理完成。当前 B2 上的备份列表："
+          rclone lsf "${B2_PATH}" | grep "${{ env.BACKUP_PREFIX }}"
