@@ -1,21 +1,9 @@
 # 工作流名称
-name: Sync Backup from WebDAV to B2 (Corrected)
+name: Sync Backup from WebDAV to B2
 
-# 工作流触发器：手动触发 (workflow_dispatch)
+# 工作流触发器：手动触发 (workflow_dispatch)，无需任何输入
 on:
   workflow_dispatch:
-    inputs:
-      b2_bucket_name:
-        description: '您的 Backblaze B2 存储桶名称'
-        required: true
-      webdav_backup_path:
-        description: 'WebDAV 上的备份文件存放目录'
-        required: true
-        default: 'backup'
-      webdav_backup_filename:
-        description: 'WebDAV 上的备份文件名称'
-        required: true
-        default: 'minisys_backup.tar.gz'
 
 # 全局环境变量
 env:
@@ -24,16 +12,18 @@ env:
   WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
   WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
   WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+  WEBDAV_BACKUP_PATH: "backup" # WebDAV上的备份目录
+  WEBDAV_BACKUP_FILENAME: "minisys_backup.tar.gz" # WebDAV上的备份文件名
 
   # --- Backblaze B2 目标配置 ---
   B2_REMOTE_NAME: destination_b2
-  B2_BUCKET_NAME: ${{ github.event.inputs.b2_bucket_name }}
-  B2_BACKUP_DIR: backup
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }} # 从 Secrets 读取
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # B2 的免费下载 URL
 
   # --- 备份管理配置 ---
+  B2_BACKUP_DIR: backup # B2 存储桶内的目标目录
   BACKUP_PREFIX: minisys_backup_
   BACKUP_RETENTION_COUNT: 2 # 在 B2 上保留的备份数量
 
@@ -52,7 +42,7 @@ jobs:
           sudo apt-get install -y rclone
           echo "✅ rclone 安装完毕。"
 
-      - name: 2. 配置 rclone 远程存储 (Corrected)
+      - name: 2. 配置 rclone 远程存储
         run: |
           echo "正在配置 WebDAV 和 Backblaze B2 的 rclone 远程..."
           
@@ -63,71 +53,63 @@ jobs:
             user="${{ env.WEBDAV_USER }}" \
             pass="${{ env.WEBDAV_PASS }}"
 
-          # 配置 Backblaze B2 目标
-          # **关键修正**: 移除了错误的 'endpoint' 参数，
-          # 使用 'download_url' 参数来指定免费下载链接，
-          # rclone 会自动处理标准的上传/管理API端点。
+          # 配置 Backblaze B2 目标 (使用正确的 download_url 参数)
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
             account="${{ env.B2_ACCOUNT_ID }}" \
             key="${{ env.B2_ACCOUNT_KEY }}" \
             download_url="${{ env.B2_DOWNLOAD_URL }}"
 
           echo "✅ rclone 远程配置完成。"
-          echo "当前 rclone 远程列表："
           rclone listremotes
 
       - name: 3. 转移备份文件到 B2
-        id: transfer
         run: |
-          WEBDAV_PATH="${{ env.WEBDAV_REMOTE_NAME }}:${{ github.event.inputs.webdav_backup_path }}"
-          FILENAME="${{ github.event.inputs.webdav_backup_filename }}"
+          WEBDAV_SOURCE_FILE="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.WEBDAV_BACKUP_PATH }}/${{ env.WEBDAV_BACKUP_FILENAME }}"
           
-          echo "🔎 正在检查源文件 ${WEBDAV_PATH}/${FILENAME} 是否存在..."
-          if ! rclone lsf "${WEBDAV_PATH}" | grep -q "^${FILENAME}$"; then
+          echo "🔎 正在检查源文件 ${WEBDAV_SOURCE_FILE} 是否存在..."
+          if ! rclone size "${WEBDAV_SOURCE_FILE}" > /dev/null 2>&1; then
             echo "❌ 错误：在 WebDAV 源上未找到指定的备份文件！"
             exit 1
           fi
 
           TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
           B2_FILENAME="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.gz"
-          B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${B2_FILENAME}"
+          B2_DESTINATION_FILE="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${B2_FILENAME}"
 
-          echo "🚀 准备就绪，正在从 WebDAV 传输文件到 Backblaze B2..."
-          echo "   -> 源: ${WEBDAV_PATH}/${FILENAME}"
-          echo "   -> 目标: ${B2_FULL_PATH}"
+          echo "🚀 准备就绪，正在从 WebDAV 流式传输文件到 Backblaze B2..."
+          echo "   -> 源: ${WEBDAV_SOURCE_FILE}"
+          echo "   -> 目标: ${B2_DESTINATION_FILE}"
 
-          # rcat 流式传输，不占用本地磁盘空间。上传操作会使用标准的B2 API。
-          rclone rcat "${WEBDAV_PATH}/${FILENAME}" "${B2_FULL_PATH}" --progress
+          # 使用 rcat 流式传输，不占用本地磁盘空间
+          rclone rcat "${WEBDAV_SOURCE_FILE}" "${B2_DESTINATION_FILE}" --progress
           
           echo "✅ 文件成功传输到 B2！"
-          echo "b2_remote_path=${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}" >> $GITHUB_OUTPUT
 
       - name: 4. 清理 B2 上的旧备份
-        # 这个步骤仅在成功时执行
+        # 仅在前一步成功时执行
         if: success()
         run: |
-          B2_PATH="${{ steps.transfer.outputs.b2_remote_path }}"
-          if [ -z "$B2_PATH" ]; then
-            echo "⚠️ 未获取到 B2 路径，跳过清理步骤。"
-            exit 0
-          fi
+          B2_TARGET_DIR="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
+          RETENTION_COUNT=${{ env.BACKUP_RETENTION_COUNT }}
           
-          echo "🧹 开始清理 Backblaze B2 上的旧备份..."
-          echo "    目标路径: ${B2_PATH}"
-          echo "    保留数量: ${{ env.BACKUP_RETENTION_COUNT }}"
-          
-          # 使用 rclone delete 配合 --min-age 来删除除了最新的 N 个备份之外的所有文件
-          # 这个命令会列出所有匹配前缀的备份文件，然后按时间倒序排序，
-          # 跳过最新的几个，然后删除其余的。
-          rclone delete "${B2_PATH}" \
-            --include "${{ env.BACKUP_PREFIX }}*.tar.gz" \
-            --min-age 1s \
-            --dry-run # 首先进行演练，确认要删除的文件
-          
-          # 正式执行删除
-          rclone delete "${B2_PATH}" \
-            --include "${{ env.BACKUP_PREFIX }}*.tar.gz" \
-            --min-age 1s -v # 正式删除并显示详细过程
+          echo "🧹 开始清理 Backblaze B2 上的旧备份 (${B2_TARGET_DIR})..."
+          echo "    将保留最新的 ${RETENTION_COUNT} 个备份。"
 
-          echo "✅ 旧备份清理完成。当前 B2 上的备份列表："
-          rclone lsf "${B2_PATH}" | grep "${{ env.BACKUP_PREFIX }}"
+          # 列出所有备份文件，按名称排序（时间戳保证了排序正确性），然后选取需要删除的旧文件
+          FILES_TO_DELETE=$(rclone lsf --format "p" "${B2_TARGET_DIR}" | grep "${{ env.BACKUP_PREFIX }}" | sort | head -n -${RETENTION_COUNT})
+          
+          if [ -z "${FILES_TO_DELETE}" ]; then
+            echo "ℹ️ 当前备份数量未超过限制，无需清理。"
+          else
+            echo "🗑️ 以下旧备份将被删除："
+            echo "${FILES_TO_DELETE}"
+            
+            # 逐个删除旧文件
+            echo "${FILES_TO_DELETE}" | while read file; do
+              rclone delete "${B2_TARGET_DIR}/${file}" --rc-addr=localhost:0 -v
+            done
+            echo "✅ 旧备份清理完成。"
+          fi
+
+          echo "📊 当前 B2 上的备份列表："
+          rclone lsf "${B2_TARGET_DIR}" | grep "${{ env.BACKUP_PREFIX }}"
