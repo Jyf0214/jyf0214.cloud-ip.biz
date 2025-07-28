@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (B2 ZSTD v10 - Final URL Fix)
+name: CI with Persistent Environment (B2 ZSTD v11 - Final Auth Fix)
 
 # ... (on, concurrency, 部分与之前版本完全相同) ...
 on:
@@ -44,7 +44,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v10)"
+    name: "Run All Services (B2 ZSTD v11)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -73,7 +73,8 @@ jobs:
             set -eo pipefail
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
-            echo "正在配置 rclone (仅用于文件列表和上传)..."
+            # [关键] 配置 rclone 时不使用 download_url, 以确保 rclone link 能与官方 API 通信
+            echo "正在配置 rclone (用于生成授权链接)..."
             rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
 
             B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
@@ -84,20 +85,29 @@ jobs:
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
+                REMOTE_FILE_FULL_PATH="${B2_REMOTE_PATH}/${LATEST_BACKUP_FILENAME}"
 
-                # --- [v10 最终修复]: 精准构建与代理匹配的 B2 标准 URL ---
-                # 1. 清理代理域名格式
+                # --- [v11 最终修复]: 分离授权和下载 ---
+                # 1. 使用 rclone link 生成一个官方的、包含授权令牌的预签名URL
+                echo "   -> 正在从 B2 官方获取预签名授权链接..."
+                OFFICIAL_PRESIGNED_URL=$(rclone link "${REMOTE_FILE_FULL_PATH}")
+                if [[ -z "$OFFICIAL_PRESIGNED_URL" ]]; then
+                  echo "❌ 无法从 rclone 获取预签名链接！请检查 rclone 配置和文件路径。" >&2; exit 1
+                fi
+                echo "   -> ✅ 成功获取官方链接。"
+
+                # 2. 将官方链接中的域名替换为您的代理域名
                 PROXY_DOMAIN_RAW="${{ env.B2_DOWNLOAD_URL }}"
                 CLEANED_DOMAIN="${PROXY_DOMAIN_RAW#*//}"
                 CLEANED_DOMAIN="${CLEANED_DOMAIN%/}"
                 
-                # 2. 精准构建包含完整 B2 路径的 URL
-                DOWNLOAD_URL="https://${CLEANED_DOMAIN}/file/${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${LATEST_BACKUP_FILENAME}"
-                
-                echo "   -> [精准构建] 最终下载链接: ${DOWNLOAD_URL}"
+                # 使用 sed 进行安全的替换
+                FINAL_DOWNLOAD_URL=$(echo "${OFFICIAL_PRESIGNED_URL}" | sed "s|https://[^/]*|https://${CLEANED_DOMAIN}|")
+
+                echo "   -> [智能构建] 最终下载链接 (已包含授权): ${FINAL_DOWNLOAD_URL}"
                 echo "   -> 开始使用 curl 下载文件..."
                 
-                curl -L --fail --retry 3 -o "${LOCAL_BACKUP_PATH}" "${DOWNLOAD_URL}"
+                curl -L --fail --retry 3 -o "${LOCAL_BACKUP_PATH}" "${FINAL_DOWNLOAD_URL}"
 
                 if [[ ! -s "${LOCAL_BACKUP_PATH}" ]]; then
                     echo "❌ 下载失败：本地文件不存在或大小为0！请检查 curl 命令是否成功以及 URL 是否可以访问。" >&2
