@@ -1,16 +1,14 @@
 # 工作流名称
-name: CI with Persistent Environment (Versioned Backups - B2 ZSTD v5 - Download URL Fix)
+name: CI with Persistent Environment (Versioned Backups - B2 ZSTD v6 - Robust Download)
 
 # 工作流触发器
 on:
   workflow_dispatch:
     inputs:
-      # --- 核心控制开关 ---
+      # (内容与之前一致，此处省略)
       create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: true }
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
-
-      # --- 服务独立启动开关 (仅当 "run_startup_script" 为 true 时生效) ---
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
       run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
@@ -29,23 +27,17 @@ concurrency:
 
 # 全局环境变量
 env:
-  # --- 系统与路径配置 ---
+  # (内容与之前一致，此处省略)
   CHROOT_DIR: /mnt/minisys
   BACKUP_PREFIX: "minisys_backup_"
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-
-  # --- Backblaze B2 备份配置 ---
   B2_REMOTE_NAME: "b2_backup_destination"
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_BACKUP_DIR: "backup"
-  BACKUP_RETENTION_COUNT: 2 # 在 B2 上保留的备份数量
-
-  # --- Backblaze B2 Secrets ---
+  BACKUP_RETENTION_COUNT: 2
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # 下载代理链接
-  
-  # --- 应用与服务 Secrets ---
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
   PAT: ${{ secrets.PAT }}
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
@@ -56,7 +48,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v5)"
+    name: "Run All Services (B2 ZSTD v6)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -65,45 +57,55 @@ jobs:
       - name: 2. 最大化运行器磁盘空间
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
-      - name: 3. 安装全部所需依赖 (zstd, pigz, rclone)
+      - name: 3. 安装全部所需依赖
         run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq bc
 
-      - name: 4. 设置 Python 和 Node.js 环境
+      - name: 4. 设置环境
         uses: actions/setup-node@v3
         with: { node-version: '18' }
       - uses: actions/setup-python@v4
         with: { python-version: "3.9" }
 
-      - name: 5. ⚡️ 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
+      - name: 5. ⚡️ [修复] 并行执行：智能恢复 Chroot (后台) & 部署 Python 应用 (前台)
         id: restore_or_create
         run: |
           BG_LOG_FILE=$(mktemp)
           echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
 
-          # 启动后台任务：从 B2 智能恢复或创建 Chroot 环境
+          # 启动后台任务
           (
             set -eo pipefail
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             echo "正在配置 rclone 以连接到 Backblaze B2..."
-            
-            # --- [关键修复] ---
-            # 在 rclone 配置中明确指定 download_url，强制使用代理链接下载
             rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
 
             B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-            echo "1. 正在 B2 存储桶 (${B2_REMOTE_PATH}) 中查找最新的备份 (优先 .zst, 其次 .gz)..."
+            echo "1. 正在 B2 存储桶 (${B2_REMOTE_PATH}) 中查找最新的备份..."
             LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_REMOTE_PATH}/ | \
                                       jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
 
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
+                REMOTE_FILE_PATH="${B2_REMOTE_PATH}/${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
-                echo "   -> 开始从 B2 下载文件 (使用指定的下载链接)..."
-                # 使用 copyto 下载单个文件
-                rclone copyto "${B2_REMOTE_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
-                echo "--- [后台任务] ✅ 下载完成。开始解压..."
+
+                # --- [关键修复 1/3]: 下载前预检 ---
+                echo "   -> [预检] 正在检查远程文件大小..."
+                rclone size --json "${REMOTE_FILE_PATH}" || { echo "❌ 预检失败：无法获取远程文件大小！" >&2; exit 1; }
                 
+                # --- [关键修复 2/3]: 使用无附加参数、高兼容性的下载命令 ---
+                echo "   -> 开始从 B2 下载文件 (采用高兼容性单线程模式)..."
+                # 为调试添加 -v --dump headers, 成功后可移除 --dump headers
+                rclone copyto -v --dump headers "${REMOTE_FILE_PATH}" ${LOCAL_BACKUP_PATH} --progress
+
+                # --- [关键修复 3/3]: 下载后校验 ---
+                if [[ ! -s "${LOCAL_BACKUP_PATH}" ]]; then
+                    echo "❌ 下载失败：本地文件不存在或大小为0！请检查上方 rclone 日志。" >&2
+                    exit 1
+                fi
+
+                echo "--- [后台任务] ✅ 下载完成。开始解压..."
                 if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
                     echo "   -> 使用 zstd 进行解压..."
                     unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
@@ -120,7 +122,8 @@ jobs:
           ) > ${BG_LOG_FILE} 2>&1 &
           CHROOT_SETUP_PID=$!
           
-          # 前台任务：部署 Python 应用
+          # 前台任务
+          # (内容与之前一致，此处省略)
           echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
           npm install -g pm2; rm -rf chatgpt-on-wechat
           git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/chatgpt-on-wechat.git || true
@@ -137,6 +140,8 @@ jobs:
           
           echo "--- ✅ 所有并行任务完成 ---"
           if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
+
+      # (后续步骤 6, 7, 8A, 8B, 9 与之前版本一致)
 
       - name: 6. 挂载虚拟文件系统
         run: |
@@ -159,9 +164,47 @@ jobs:
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
+          # (内容与原版一致)
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # (内容与原版一致，此处省略以保持简洁)
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
+          #!/bin/bash
+          set -e
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher }}'
+          export RUN_REDIS='${{ github.event.inputs.run_redis }}'
+          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai }}'
+          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav }}'
+          export RUN_OPENLIST='${{ github.event.inputs.run_openlist }}'
+          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp }}'
+          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel }}'
+          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
+          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
+          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
+          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
+          export NAPCATUSER='${{ env.NAPCATUSER }}'
+          export NAPCATPASS='${{ env.NAPCATPASS }}'
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
+          HOME_DIR="/root"
+
+          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
+          pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
           
+          if [[ "\$RUN_LAUNCHER" == "true" ]]; then [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "[已禁用] 跳过 launcher。"; fi
+          if [[ "\$RUN_REDIS" == "true" ]]; then command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "[已禁用] 跳过 Redis。"; fi
+          if [[ "\$RUN_YUNZAI" == "true" ]]; then [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "[已禁用] 跳过 Yunzai-Bot。"; fi
+          if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "[已禁用] 跳过 loophole。"; fi
+          if [[ "\$RUN_OPENLIST" == "true" ]]; then [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "[已禁用] 跳过 openlist。"; fi
+          if [[ "\$RUN_CHMLFRP" == "true" ]]; then [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "[已禁用] 跳过 ChmlFrp。"; fi
+
+          pm2 save && pm2 ls
+          EOF
+          
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
+
+          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
+          sleep ${RUNTIME_MINUTES}m
+          echo "⏳ 规定运行时间已到。"
+
       - name: 8B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
@@ -174,12 +217,12 @@ jobs:
       - name: 10. ⚡️ [极速] 创建版本化备份 (zstd) 到 B2 并清理旧版本
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
+          # (上传时可以继续使用多线程，一般不会有问题)
           echo "--- 停止相关服务 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
           
           echo "--- 1. 使用 zstd (高压缩) 创建新备份并上传到 B2 ---"
-          # 同样在此处加入 download_url，保持配置一致性
           rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
@@ -187,23 +230,24 @@ jobs:
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
 
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
+          # 上传时恢复使用高性能参数
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat ${B2_REMOTE_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
 
           echo "--- 2. 校验备份文件大小是否超过 4.5 GB ---"
+          # (内容与之前一致)
           MAX_SIZE_BYTES=4831838208 # 4.5 GiB
           UPLOADED_SIZE_BYTES=$(rclone size --json "${B2_REMOTE_PATH}/${NEW_BACKUP_FILE}" | jq '.bytes')
-
           if (( $(echo "$UPLOADED_SIZE_BYTES > $MAX_SIZE_BYTES" | bc -l) )); then
             echo "====================================================================" >&2
             echo "⚠️ 警告：新创建的备份大小 (${UPLOADED_SIZE_BYTES} bytes) 已超过 4.5 GB 的限制！" >&2
-            echo "这可能导致未来因超出 10GB 总空间而备份失败。请清理 Chroot 环境内文件。" >&2
             echo "====================================================================" >&2
           else
             echo "✅ 备份文件大小在限制范围内。"
           fi
 
           echo "--- 3. 清理 B2 上的旧备份 (保留 ${{ env.BACKUP_RETENTION_COUNT }} 个最新) ---"
+          # (内容与之前一致)
           FILES_TO_DELETE=$(rclone lsjson ${B2_REMOTE_PATH}/ | \
                               jq --argjson count "${{ env.BACKUP_RETENTION_COUNT }}" -r \
                               '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-$count][] | .Name' 2>/dev/null)
