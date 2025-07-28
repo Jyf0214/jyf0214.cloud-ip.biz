@@ -7,7 +7,7 @@ on:
     inputs:
       # --- 核心调试与模式开关 ---
       no_cache:
-        description: '🚫 [模式] 不使用缓存, 强制全新环境? (将禁用备份和自动启动,并强制SSH)'
+        description: '🚫 [模式] 不恢复备份,强制创建全新环境? (服务不会自动启动,将强制SSH,但结束时仍会备份)'
         required: true
         type: boolean
         default: false
@@ -19,22 +19,21 @@ on:
 
       # --- 核心功能开关 (no_cache=false 时有效) ---
       create_backup_on_finish:
-        description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)'
+        description: '✅ [核心] 是否在结束时创建环境备份? (无论是否使用无缓存模式,此开关都有效)'
         required: true
         type: boolean
         default: true
       run_startup_script:
-        description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?'
+        description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本? (无缓存模式下无效)'
         required: true
         type: boolean
         default: true
-
-      # --- [新] 服务启动控制 (run_startup_script=true 时有效) ---
+      
+      # --- 服务启动控制 (run_startup_script=true 时有效) ---
       services_to_run:
-        description: '🚀 [服务] 空格分隔的服务列表。例: "launcher redis yunzai loophole_webdav+napcat openlist chmlfrp"'
+        description: '  - 要启动的服务列表 (逗号分隔, 如: launcher,redis,yunzai). 留空或填 "all" 启动所有默认服务.'
         type: string
-        default: 'launcher redis yunzai loophole_webdav openlist chmlfrp'
-
+        default: 'launcher,redis,yunzai,loophole_webdav,openlist,chmlfrp'
 
 # 并发控制
 concurrency:
@@ -61,7 +60,7 @@ env:
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }} # 注意: 此变量不再被echo, 仅供内部潜在使用
   PAT: ${{ secrets.YUNZAIBOT_PAT }}
 
   # --- Chroot 内服务所需 Secrets ---
@@ -96,6 +95,7 @@ jobs:
         if: github.event.inputs.no_cache == 'false'
         id: restore_or_create
         run: |
+          # 此步骤的脚本与 v7 版本相同，并行恢复和部署
           BG_LOG_FILE=$(mktemp)
           echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
 
@@ -115,7 +115,7 @@ jobs:
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
                 rclone copyto "${{ env.B2_REMOTE_NAME }}:${B2_BUCKET_NAME}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
                 echo "--- [后台任务] ✅ 下载完成。开始解压..."
-
+                
                 if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
                     unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
                 else
@@ -129,21 +129,21 @@ jobs:
             echo "--- [后台任务] ✅ Chroot 恢复/创建任务成功完成 ---"
           ) > ${BG_LOG_FILE} 2>&1 &
           CHROOT_SETUP_PID=$!
-
+          
           # 前台任务：部署 Python 应用
           echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
           npm install -g pm2; rm -rf ${{ env.PYTHON_APP_REPO_DIR }}
           git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/${{ env.PYTHON_APP_REPO_DIR }}.git || true
           cd ${{ env.PYTHON_APP_REPO_DIR }} && python -m pip install --upgrade pip && pip install -r requirements.txt --target ./ || true && pm2 start "python3 app.py" --name "python-app"
-
+          
           echo "--- [前台任务] ✅ Python 应用已启动。等待后台 Chroot 任务完成... ---"
           if ! wait ${CHROOT_SETUP_PID}; then
             echo "=================================================" >&2; echo "❌ ERROR: 后台 Chroot 设置任务失败！" >&2; cat ${BG_LOG_FILE} >&2; exit 1
           fi
-
+          
           echo "--- ✅ 所有并行任务完成 ---"
           if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
-
+      
       - name: 5B. [无缓存模式] 创建全新的 Chroot 环境
         if: github.event.inputs.no_cache == 'true'
         run: |
@@ -165,10 +165,10 @@ jobs:
 
       - name: 7B. [修复] 安装 Chroot 环境内的 Node.js 和 PM2
         # 在自动化或无缓存调试模式下，都需要确保chroot内有Node.js环境
-        if: github.event.inputs.run_startup_script == 'true' || github.event.inputs.no_cache == 'true'
+        if: (github.event.inputs.run_startup_script == 'true' && github.event.inputs.no_cache == 'false') || github.event.inputs.no_cache == 'true'
         run: |
           echo "--- [Chroot Prep] 开始在 Chroot 环境中安装 Node.js 和 PM2 ---"
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh > /dev/null << 'EOF'
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/prepare_env.sh > /dev/null << EOF
           #!/bin/bash
           set -ex
           echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -189,64 +189,85 @@ jobs:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # 使用 'EOF' 以防止 runner shell 预先展开脚本内的变量 (如 $HOME_DIR)
-          # chroot 内部脚本将通过 `env` 命令接收来自 workflow 的变量
+          # 创建将在 Chroot 环境内执行的启动脚本
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
+          # --- 环境设置 ---
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
-          echo "--- 请求启动的服务: ${SERVICES_TO_RUN}"
-          pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
+          echo "服务启动列表: ${SERVICES_TO_RUN}"
 
-          if [[ "$SERVICES_TO_RUN" =~ "launcher" ]]; then
+          # 清理旧日志和PM2记录
+          pm2 flush
+          find "${HOME_DIR}" -name "*.log" -type f -delete
+
+          # --- 辅助函数 ---
+          # 检查给定的服务名称是否在要运行的服务列表中
+          should_run() {
+              # 如果 SERVICES_TO_RUN 为空, "all", 或者 "*", 则认为应该运行所有服务
+              if [[ -z "${SERVICES_TO_RUN}" || "${SERVICES_TO_RUN}" == "all" || "${SERVICES_TO_RUN}" == "*" ]]; then
+                  return 0 # true
+              fi
+              # 检查服务名是否在逗号分隔的列表中 (注意前后的逗号,确保精确匹配)
+              if [[ ",${SERVICES_TO_RUN}," == *",$1,"* ]]; then
+                  return 0 # true
+              fi
+              return 1 # false
+          }
+
+          # --- 服务启动逻辑 ---
+          # 服务关键词: launcher, redis, yunzai, loophole_webdav, napcat_tunnel, openlist, chmlfrp
+          
+          if should_run "launcher"; then
             (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "-> 警告: launcher.sh 启动失败或未找到。"
           fi
-          if [[ "$SERVICES_TO_RUN" =~ "redis" ]]; then
-            command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "-> 警告: redis-server 启动失败或未安装。"
-          fi
-          if [[ "$SERVICES_TO_RUN" =~ "yunzai" ]]; then
-            (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "-> 警告: Yunzai 启动失败或未找到。"
-          fi
-          if [[ "$SERVICES_TO_RUN" =~ "loophole_webdav" ]]; then
-            if [ -f "${HOME_DIR}/loophole/loophole" ]; then
-                cd "${HOME_DIR}/loophole"
-                pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
-                # 检查是否需要同时启动 napcat 隧道
-                if [[ "$SERVICES_TO_RUN" =~ "loophole_webdav+napcat" ]]; then
-                    echo "--- 检测到 '+napcat'，额外启动 Napcat 隧道 ---"
-                    pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
-                fi
+
+          if should_run "redis"; then
+            if command -v redis-server &> /dev/null; then
+              redis-server --daemonize yes
             else
-              echo "-> 警告: loophole 可执行文件未找到。"
+              echo "-> 警告: redis-server 命令未找到。"
             fi
           fi
-          if [[ "$SERVICES_TO_RUN" =~ "openlist" ]]; then
-            (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "-> 警告: openlist 启动失败或未找到。"
-          fi
-          if [[ "$SERVICES_TO_RUN" =~ "chmlfrp" ]]; then
-            (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "-> 警告: ChmlFrp/frpc 启动失败或未找到。"
+
+          if should_run "yunzai"; then
+            (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "-> 警告: Yunzai 启动失败或未找到。"
           fi
 
-          echo "--- 所有服务启动完毕 ---"
-          pm2 save && pm2 ls
+          if should_run "loophole_webdav"; then
+            if [ -f "${HOME_DIR}/loophole/loophole" ]; then
+              cd "${HOME_DIR}/loophole"
+              pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
+              # 检查是否也需要启动 napcat 隧道 (作为 loophole 的子服务)
+              if should_run "napcat_tunnel"; then
+                pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
+              fi
+            else
+                echo "-> 警告: Loophole 可执行文件未找到。"
+            fi
+          fi
+
+          if should_run "openlist"; then
+            (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "-> 警告: openlist 启动失败或未找到。"
+          fi
+
+          if should_run "chmlfrp"; then
+            (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "-> 警告: ChmlFrp 启动失败或未找到。"
+          fi
+
+          # 保存 PM2 进程列表并在日志中显示
+          echo "--- [Chroot 环境内] 服务启动完成 ---"
+          pm2 save
+          pm2 ls
           EOF
 
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
 
-          # 使用 env 命令安全地将 workflow 变量传递到 chroot 环境中
-          # 这些变量将在 /tmp/startup.sh 脚本中被使用
-          sudo chroot ${{ env.CHROOT_DIR }} \
-            env \
-            SERVICES_TO_RUN="${{ github.event.inputs.services_to_run }}" \
-            LOOPHOLE_WEBDAV_USER="${{ env.LOOPHOLE_WEBDAV_USER }}" \
-            LOOPHOLE_WEBDAV_PASS="${{ env.LOOPHOLE_WEBDAV_PASS }}" \
-            LOOPHOLE_WEBDAV_HOSTNAME="${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}" \
-            LOOPHOLE_NAPCAT_HOSTNAME="${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}" \
-            NAPCATUSER="${{ env.NAPCATUSER }}" \
-            NAPCATPASS="${{ env.NAPCATPASS }}" \
-            /tmp/startup.sh
+          # 将外部的 input 变量作为环境变量传递给 chroot 内的脚本并执行
+          echo "将 'services_to_run' 输入 (${{ github.event.inputs.services_to_run }}) 传递到 Chroot 环境中..."
+          sudo chroot ${{ env.CHROOT_DIR }} bash -c "export SERVICES_TO_RUN='${{ github.event.inputs.services_to_run }}'; /tmp/startup.sh"
 
           echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."
           sleep ${RUNTIME_MINUTES}m
@@ -268,21 +289,21 @@ jobs:
           sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
       - name: 10. [安全/极速] 创建双备份到 B2 并清理旧版本
-        # 仅在成功、非取消、需要备份且非无缓存模式下运行
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true' && github.event.inputs.no_cache == 'false'
+        # 仅在成功、非取消、且需要备份的模式下运行。不再受 no_cache 影响。
+        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
           echo "--- 准备创建备份 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${B2_ACCOUNT_ID}" key "${B2_ACCOUNT_KEY}"
-
+          
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           REMOTE_ROOT="${{ env.B2_REMOTE_NAME }}:${B2_BUCKET_NAME}"
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
 
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-
+          
           echo "--- 1. 使用 zstd 创建并上传到 B2 根目录 ---"
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat "${REMOTE_ROOT}/${NEW_BACKUP_FILE}" ${{ env.RCLONE_FLAGS }}
           echo "✅ 主备份上传成功。"
@@ -291,6 +312,7 @@ jobs:
           rclone copy "${REMOTE_ROOT}/${NEW_BACKUP_FILE}" "${REMOTE_ROOT}/${{ env.B2_BACKUP_DIR }}/" ${{ env.RCLONE_FLAGS }}
           echo "✅ 第二份备份已同步。"
 
+          # --- [安全移除] 不再打印任何可能包含敏感信息的下载链接 ---
           echo "✅ 备份文件已上传至 Backblaze B2 的根目录和 /${{ env.B2_BACKUP_DIR }} 目录。"
 
           echo "--- 3. 清理 B2 上的旧备份 (各保留${{ env.BACKUP_RETENTION_COUNT }}个最新) ---"
