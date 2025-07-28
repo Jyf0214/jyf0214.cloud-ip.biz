@@ -1,7 +1,7 @@
 # 工作流名称
-name: CI with Persistent Environment (B2 ZSTD v8 - Final Fix)
+name: CI with Persistent Environment (B2 ZSTD v9 - Final URL Fix)
 
-# ... (on, concurrency 部分与之前版本完全相同) ...
+# ... (on, concurrency, 部分与之前版本完全相同) ...
 on:
   workflow_dispatch:
     inputs:
@@ -31,15 +31,10 @@ env:
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_BACKUP_DIR: "backup"
   BACKUP_RETENTION_COUNT: 2
-  
-  # --- [重要] 请确保以下 Secrets 已全部设置 ---
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
-  B2_BUCKET_ID: ${{ secrets.B2_BUCKET_ID }} # <-- [新增] 请在 Secrets 中添加此项
-
   PAT: ${{ secrets.PAT }}
-  # ... (其他 secrets) ...
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
@@ -47,10 +42,9 @@ env:
   NAPCATUSER: ${{ secrets.NAPCATUSER }}
   NAPCATPASS: ${{ secrets.NAPCATPASS }}
 
-
 jobs:
   build-and-run-all:
-    name: "Run All Services (B2 ZSTD v8)"
+    name: "Run All Services (B2 ZSTD v9)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
@@ -79,7 +73,6 @@ jobs:
             set -eo pipefail
             echo "--- [后台任务] 开始执行 Chroot 智能恢复/创建 ---"
             sudo mkdir -p ${{ env.CHROOT_DIR }}
-            # rclone 仅用于列出文件和上传，无需配置下载链接
             echo "正在配置 rclone (仅用于文件列表和上传)..."
             rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
 
@@ -92,13 +85,22 @@ jobs:
                 echo "   -> ✅ 发现最新可用备份: ${LATEST_BACKUP_FILENAME}"
                 LOCAL_BACKUP_PATH="/tmp/backup.archive"
 
-                # --- [最终修复]: 手动构建与代理兼容的 URL, 并使用 curl 下载 ---
-                DOWNLOAD_URL="https://${{ env.B2_DOWNLOAD_URL }}/file/${{ env.B2_BUCKET_NAME }}/${LATEST_BACKUP_FILENAME}"
-                echo "   -> [手动构建] 最终下载链接: ${DOWNLOAD_URL}"
+                # --- [v9 最终修复]: 智能构建代理URL, 并使用 curl 下载 ---
+                # 1. 从 Secret 获取原始域名
+                PROXY_DOMAIN_RAW="${{ env.B2_DOWNLOAD_URL }}"
+                # 2. 清理协议头 (http:// 或 https://)
+                CLEANED_DOMAIN="${PROXY_DOMAIN_RAW#*//}"
+                # 3. 清理末尾的斜杠 /
+                CLEANED_DOMAIN="${CLEANED_DOMAIN%/}"
+                
+                # 4. 构建最简单、最可能正确的 URL
+                DOWNLOAD_URL="https://${CLEANED_DOMAIN}/${LATEST_BACKUP_FILENAME}"
+                
+                echo "   -> [智能构建] 最终下载链接: ${DOWNLOAD_URL}"
                 echo "   -> 开始使用 curl 下载文件..."
                 
                 # 使用 curl: -L (跟随跳转), --fail (出错时快速失败), -o (输出到文件)
-                curl -L --fail -o "${LOCAL_BACKUP_PATH}" "${DOWNLOAD_URL}"
+                curl -L --fail --retry 3 -o "${LOCAL_BACKUP_PATH}" "${DOWNLOAD_URL}"
 
                 if [[ ! -s "${LOCAL_BACKUP_PATH}" ]]; then
                     echo "❌ 下载失败：本地文件不存在或大小为0！请检查 curl 命令是否成功以及 URL 是否可以访问。" >&2
@@ -182,23 +184,18 @@ jobs:
           export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
-
           if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
-          
           if [[ "\$RUN_LAUNCHER" == "true" ]]; then [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "[已禁用] 跳过 launcher。"; fi
           if [[ "\$RUN_REDIS" == "true" ]]; then command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "[已禁用] 跳过 Redis。"; fi
           if [[ "\$RUN_YUNZAI" == "true" ]]; then [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "[已禁用] 跳过 Yunzai-Bot。"; fi
           if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "[已禁用] 跳过 loophole。"; fi
           if [[ "\$RUN_OPENLIST" == "true" ]]; then [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "[已禁用] 跳过 openlist。"; fi
           if [[ "\$RUN_CHMLFRP" == "true" ]]; then [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "[已禁用] 跳过 ChmlFrp。"; fi
-
           pm2 save && pm2 ls
           EOF
-          
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-
           echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
           sleep ${RUNTIME_MINUTES}m
           echo "⏳ 规定运行时间已到。"
@@ -218,18 +215,15 @@ jobs:
           echo "--- 停止相关服务 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
-          
           echo "--- 1. 使用 zstd (高压缩) 创建新备份并上传到 B2 ---"
           rclone config create "${{ env.B2_REMOTE_NAME }}" b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           B2_REMOTE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
           echo "新备份文件名: ${NEW_BACKUP_FILE}"
-
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -15 -c | rclone rcat ${B2_REMOTE_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
-
           echo "--- 2. 校验备份文件大小是否超过 4.5 GB ---"
           MAX_SIZE_BYTES=4831838208
           UPLOADED_SIZE_BYTES=$(rclone size --json "${B2_REMOTE_PATH}/${NEW_BACKUP_FILE}" | jq '.bytes')
@@ -240,12 +234,10 @@ jobs:
           else
             echo "✅ 备份文件大小在限制范围内。"
           fi
-
           echo "--- 3. 清理 B2 上的旧备份 (保留 ${{ env.BACKUP_RETENTION_COUNT }} 个最新) ---"
           FILES_TO_DELETE=$(rclone lsjson ${B2_REMOTE_PATH}/ | \
                               jq --argjson count "${{ env.BACKUP_RETENTION_COUNT }}" -r \
                               '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-$count][] | .Name' 2>/dev/null)
-          
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
             echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"
             for file_name in $FILES_TO_DELETE; do
