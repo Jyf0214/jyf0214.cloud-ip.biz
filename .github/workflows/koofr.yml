@@ -170,7 +170,7 @@ jobs:
             rm -rf /root/.cache; \
             echo '✅ Chroot 环境清理完成。'"
 
-      # *** 修正：采用用户提供的动态脚本生成方案 ***
+      # *** 修正：采用你提供的动态脚本生成方式 ***
       - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
         run: |
