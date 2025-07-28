@@ -238,7 +238,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: 100
+          wait-timeout-minutes: 60
 
       - name: 7. 卸载 Chroot 环境的虚拟文件系统 (Unmount virtual filesystems)
         # 无论之前的步骤是否成功，都执行此步骤
