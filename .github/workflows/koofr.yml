@@ -81,7 +81,7 @@ jobs:
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
 
             echo "正在查找最新的备份文件..."
-            LATEST_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --filter "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort -r | head -n 1)
+            LATEST_BACKUP=$(rclone lsf ${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort -r | head -n 1)
             
             if [ -n "$LATEST_BACKUP" ]; then
               echo "✅ 发现最新备份: $LATEST_BACKUP。正在使用 pigz 多线程流式恢复系统..."
@@ -253,8 +253,9 @@ jobs:
           echo "✅ 备份上传成功。"
 
           echo "执行备份保留策略 (保留最新的 ${{ env.BACKUP_RETENTION_COUNT }} 个)..."
-          # 列出所有备份，按名称（时间）排序，保留最新的N个，其余的删除
-          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --filter "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
+          # *** 代码修正处 ***
+          # 使用 --include 代替错误的 --filter 来匹配文件名
+          BACKUPS_TO_DELETE=$(rclone lsf ${REMOTE_PATH} --include "${{ env.BACKUP_PREFIX }}*.tar.gz" | sort | head -n -${{ env.BACKUP_RETENTION_COUNT }})
           
           if [ -n "$BACKUPS_TO_DELETE" ]; then
             echo "🗑️ 发现以下旧备份将被清理:"
