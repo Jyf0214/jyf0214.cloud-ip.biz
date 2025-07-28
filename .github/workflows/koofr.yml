@@ -19,8 +19,6 @@ on:
       run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
 
-  schedule:
-    - cron: '30 */6 * * *'
 
 # 并发控制
 concurrency:
