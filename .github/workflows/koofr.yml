@@ -38,7 +38,6 @@ env:
   B2_BACKUP_DIR: backup
   BACKUP_PREFIX: minisys_backup_
   BACKUP_RETENTION_COUNT: 2
-  # *** 修正：修复了 --transfers-8 的语法错误 ***
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
   B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
   B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
@@ -82,7 +81,6 @@ jobs:
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_ACCOUNT_ID }}" key "${{ env.B2_ACCOUNT_KEY }}"
             
             REMOTE_BASE_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}"
-            # 搜索时包含*以匹配文件和目录
             echo "正在查找最新的备份条目 (包括文件和目录)..."
             LATEST_ENTRY=$(rclone lsf ${REMOTE_BASE_PATH} --include "${{ env.BACKUP_PREFIX }}*" | sort -r | head -n 1)
             
@@ -172,24 +170,101 @@ jobs:
             rm -rf /root/.cache; \
             echo '✅ Chroot 环境清理完成。'"
 
-      - name: 6A. [自动化路径] 启动服务 (Automated Path - Run Services)
-        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
+      # *** 修正：采用用户提供的、功能完备的自动化启动脚本注入方案 ***
+      - name: 6A. [自动化路径] 清理并启动服务 (Automated Path - Cleanup and Run Services)
+        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true'
         run: |
-          echo "🚀 自动化路径：准备在 chroot 环境中启动服务..."
-          cat << EOF > ./inject_secrets.sh
-          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
-          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
-          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
-          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
+          echo "✅ 进入自动化运行模式..."
+          
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null <<EOF
+          #!/bin/bash
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
+          HOME_DIR="/root"
+
+          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
+          
+          if ! command -v pm2 &> /dev/null; then
+              echo "  -> PM2 未安装，将使用 npm 全局安装..."
+              npm install -g pm2
+          fi
+          
+          echo "1. 正在清理旧的日志文件..."
+          pm2 flush
+          find \${HOME_DIR} -name "*.log" -type f -delete
+          echo "  -> 日志已清理。"
+
+          echo "2. 正在尝试使用 PM2 启动 launcher.sh..."
+          if [ -f "\${HOME_DIR}/launcher.sh" ]; then
+              cd "\${HOME_DIR}"
+              pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher"
+          else
+              echo "  -> 警告: \${HOME_DIR}/launcher.sh 未找到，跳过。"
+          fi
+          
+          echo "3. 正在启动 Redis 服务器..."
+          if command -v redis-server &> /dev/null; then
+              redis-server --daemonize yes
+          else
+              echo "  -> 警告: redis-server 命令未找到，跳过。"
+          fi
+          
+          echo "4. 正在尝试启动 Yunzai-Bot..."
+          YUNZAI_DIR="\${HOME_DIR}/Yunzai"
+          if [ -d "\${YUNZAI_DIR}" ]; then
+              cd "\${YUNZAI_DIR}"
+              pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app"
+          else
+              echo "  -> 警告: 目录 \${YUNZAI_DIR} 未找到，跳过。"
+          fi
+
+          echo "5. 正在尝试启动 loophole 服务..."
+          LOOPHOLE_APP="\${HOME_DIR}/loophole/loophole"
+          if [ -f "\${LOOPHOLE_APP}" ]; then
+              cd "\${HOME_DIR}/loophole"
+              # 启动 loophole webdav
+              pm2 start ./loophole --name "loophole-webdav" -- \
+                webdav ~ -u "${{ env.LOOPHOLE_WEBDAV_USER }}" -p "${{ env.LOOPHOLE_WEBDAV_PASS }}" --hostname "${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}"
+              
+              # 启动 loophole http
+              pm2 start ./loophole --name "loophole-http" -- \
+                http 6099 --hostname "${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}"
+          else
+              echo "  -> 警告: \${LOOPHOLE_APP} 未找到，跳过。"
+          fi
+
+          echo "6. 正在尝试启动 openlist server..."
+          OPENLIST_APP="\${HOME_DIR}/openlist"
+          if [ -f "\${OPENLIST_APP}" ]; then
+              echo "  -> 找到 \${OPENLIST_APP}，正在启动服务..."
+              cd "\${HOME_DIR}"
+              pm2 start ./openlist --name "openlist-server" -- server
+          else
+              echo "  -> 警告: \${OPENLIST_APP} 未找到，跳过。"
+          fi
+
+          echo "7. 正在尝试启动 ChmlFrp 服务..."
+          FRPC_APP="\${HOME_DIR}/ChmlFrp/frpc"
+          if [ -f "\${FRPC_APP}" ]; then
+              echo "  -> 找到 \${FRPC_APP}，正在启动服务..."
+              cd "\${HOME_DIR}/ChmlFrp"
+              pm2 start ./frpc --name "chml-frp" -- -c frpc.ini
+          else
+              echo "  -> 警告: \${FRPC_APP} 未找到，跳过。"
+          fi
+          
+          echo "--- [Chroot 环境内] 所有启动任务已派发，正在保存PM2进程列表 ---"
+          pm2 save
+          pm2 ls
           EOF
-          sudo mv ./inject_secrets.sh ${{ env.CHROOT_DIR }}/root/inject_secrets.sh
-          sudo chmod +x ${{ env.CHROOT_DIR }}/root/inject_secrets.sh
 
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "source /root/inject_secrets.sh && /root/startup.sh" &
+          echo "赋予启动脚本执行权限并执行..."
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
 
-          echo "✅ 启动脚本已在后台执行。工作流将持续运行 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
-          sleep ${{ env.RUN_DURATION_MINUTES }}m
-
+          echo "🚀 服务已启动，工作流将在此暂停 ${{ env.RUN_DURATION_MINUTES }} 分钟..."
+          sleep $(( ${{ env.RUN_DURATION_MINUTES }} * 60 ))
+          echo "⏳ 规定运行时间已到。"
+          
       - name: 6B. [手动调试路径] 启用 Upterm SSH 会话 (Manual Path - Enable SSH Session)
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
