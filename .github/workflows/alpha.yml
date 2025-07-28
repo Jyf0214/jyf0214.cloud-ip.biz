@@ -154,7 +154,7 @@ jobs:
           if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
           if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
-EOF
+          EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
 
