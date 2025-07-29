@@ -134,29 +134,58 @@ jobs:
           echo "--- 开始深度清理 Chroot 环境 ---"
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "set -e; echo '1. 清理 apt 缓存...'; apt-get clean -y &>/dev/null; apt-get autoclean -y &>/dev/null; apt-get autoremove -y &>/dev/null; rm -rf /var/lib/apt/lists/*; echo '2. 清理通用临时文件和日志...'; rm -rf /tmp/* /var/tmp/*; find /var/log -type f -name '*.log' -delete; find /var/log -type f -name '*.gz' -delete; echo '3. 清理用户缓存和历史记录...'; rm -rf /root/.cache /root/.npm /root/.bash_history; echo '✅ Chroot 环境清理完成。'"
 
-      - name: 9A. [自动化路径] 根据开关启动服务并动态暂停
+      - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
+        # 仅在 'restored' 成功, 'run_startup_script' 启用, 且 'enable_ssh' 未启用的情况下运行
         if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
+        # [核心改动] 根据是否备份，动态设置运行时长
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
+          # 使用 tee 和 here-document 创建启动脚本
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
           #!/bin/bash
           set -e
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher }}' RUN_REDIS='${{ github.event.inputs.run_redis }}' RUN_YUNZAI='${{ github.event.inputs.run_yunzai }}' RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav }}' RUN_OPENLIST='${{ github.event.inputs.run_openlist }}' RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp }}' ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel }}'
-          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}' LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}' LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}' LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}' NAPCATUSER='${{ env.NAPCATUSER }}' NAPCATPASS='${{ env.NAPCATPASS }}'
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
-          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi; echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
+          # --- 动态传入所有开关和配置 ---
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher }}'
+          export RUN_REDIS='${{ github.event.inputs.run_redis }}'
+          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai }}'
+          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav }}'
+          export RUN_OPENLIST='${{ github.event.inputs.run_openlist }}'
+          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp }}'
+          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel }}'
+          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
+          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
+          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
+          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
+          export NAPCATUSER='${{ env.NAPCATUSER }}'
+          export NAPCATPASS='${{ env.NAPCATPASS }}'
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
+          HOME_DIR="/root"
+
+          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
+          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
+          echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
+          
           if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
           if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
           if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
           if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
           if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
           if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
-          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
+
+          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
+          pm2 save && pm2 ls
           EOF
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
+          
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
+
+          # [核心改动] 使用动态设置的变量来控制暂停时间
+          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
+          sleep ${RUNTIME_MINUTES}m
+          echo "⏳ 规定运行时间已到。"
+
 
       - name: 9B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
