@@ -150,9 +150,16 @@ jobs:
           "
 
       - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
-        # 仅在 'restored' 成功, 'run_startup_script' 启用, 且 'enable_ssh' 未启用的情况下运行
-        if: steps.restore_or_create.outputs.restored == 'true' && github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false'
-        # [核心改动] 根据是否备份，动态设置运行时长
+        # [已修正] 增加对 schedule 触发器的判断
+        if: >
+          steps.restore_or_create.outputs.restored == 'true' &&
+          (
+            github.event_name == 'schedule' ||
+            (
+              github.event.inputs.run_startup_script == 'true' &&
+              github.event.inputs.enable_ssh == 'false'
+            )
+          )
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
