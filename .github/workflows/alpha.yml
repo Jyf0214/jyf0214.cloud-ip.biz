@@ -6,18 +6,51 @@ on:
   workflow_dispatch:
     inputs:
       # --- 核心控制开关 ---
-      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: true }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
-      enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
+      create_backup_on_finish:
+        description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)'
+        required: true
+        type: boolean
+        default: true
+      run_startup_script:
+        description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?'
+        required: true
+        type: boolean
+        default: true
+      enable_ssh:
+        description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?'
+        required: true
+        type: boolean
+        default: false
 
       # --- 服务独立启动开关 ---
-      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
-      run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
-      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
-      run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
-      enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
-      run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
-      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
+      run_launcher:
+        description: '  - 是否启动 launcher 服务?'
+        type: boolean
+        default: true
+      run_redis:
+        description: '  - 是否启动 Redis 服务?'
+        type: boolean
+        default: true
+      run_yunzai:
+        description: '  - 是否启动 Yunzai-Bot 服务?'
+        type: boolean
+        default: true
+      run_loophole_webdav:
+        description: '  - 是否启动 Loophole WebDAV 隧道?'
+        type: boolean
+        default: true
+      enable_napcat_tunnel:
+        description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?'
+        type: boolean
+        default: false
+      run_openlist:
+        description: '  - 是否启动 openlist 服务?'
+        type: boolean
+        default: true
+      run_chmlfrp:
+        description: '  - 是否启动 ChmlFrp 服务?'
+        type: boolean
+        default: true
 
   schedule:
     - cron: '30 */6 * * *'
@@ -74,65 +107,91 @@ jobs:
           fi
           echo "✅ B2 配置文件已找到。"
 
-      - name: 6. ⚡️ 并行执行：恢复 Chroot (后台) & 部署 Python 应用 (前台)
+      - name: 6. ⚙️ 前台执行：下载并恢复 B2 备份
         id: restore_or_create
         run: |
-          BG_LOG_FILE=$(mktemp)
-          RCLONE_CONFIG_PATH="./chatgpt-on-wechat/rclone_b2.conf"
-          echo "📄 后台任务日志将记录在: ${BG_LOG_FILE}"
+          # 配置参数
+          RCLONE_CONFIG_PATH="./rclone_b2.conf"
+          BACKUP_REMOTE_FULL_PATH="b2:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}/${{ env.BACKUP_FILENAME }}"
+          LOCAL_BACKUP_PATH="/tmp/${{ env.BACKUP_FILENAME }}"
 
-          # 启动后台任务：从 B2 恢复或创建 Chroot 环境
-          (
-            set -eo pipefail
-            echo "--- [后台任务] 开始执行 Chroot 恢复/创建 (B2 单文件模式) ---"
-            sudo mkdir -p ${{ env.CHROOT_DIR }}
-            BACKUP_REMOTE_FULL_PATH="b2:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}/${{ env.BACKUP_FILENAME }}"
-            LOCAL_BACKUP_PATH="/tmp/${{ env.BACKUP_FILENAME }}"
+          echo "--- [前台任务] 开始执行 Chroot 恢复 (B2 单文件模式) ---"
+          sudo mkdir -p ${{ env.CHROOT_DIR }}
 
-            echo "1. 正在检查 B2 上是否存在固定备份文件: ${{ env.BACKUP_FILENAME }}"
-            if rclone size "${BACKUP_REMOTE_FULL_PATH}" --config "${RCLONE_CONFIG_PATH}" &>/dev/null; then
-                echo "   -> ✅ 发现备份文件。开始使用 'rclone copy' 多线程下载..."
-                # [核心改动] 使用多线程参数进行下载
-                rclone copy "${BACKUP_REMOTE_FULL_PATH}" "/tmp/" --config "${RCLONE_CONFIG_PATH}" ${{ env.RCLONE_MT_FLAGS }}
-                
-                echo "--- [后台任务] ✅ 下载完成。开始解压..."
-                unzstd -c "${LOCAL_BACKUP_PATH}" | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
-                rm -f "${LOCAL_BACKUP_PATH}"
-            else
-              echo "--- [后台任务] ⚠️ 未找到指定备份文件 (${{ env.BACKUP_FILENAME }})。将创建全新系统..."
-              sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+          # 检查备份文件是否存在
+          echo "1. 正在检查 B2 上是否存在备份文件: ${{ env.BACKUP_FILENAME }}"
+          if rclone size "${BACKUP_REMOTE_FULL_PATH}" --config "${RCLONE_CONFIG_PATH}" &>/dev/null; then
+            echo "   -> ✅ 发现备份文件。开始使用 'rclone copy' 多线程下载..."
+
+            # 多线程下载备份文件
+            rclone copy "${BACKUP_REMOTE_FULL_PATH}" "/tmp/" --config "${RCLONE_CONFIG_PATH}" ${{ env.RCLONE_MT_FLAGS }}
+
+            # 验证下载完整性
+            echo "2. 验证下载文件完整性..."
+            REMOTE_SIZE=$(rclone size "${BACKUP_REMOTE_FULL_PATH}" --config "${RCLONE_CONFIG_PATH}" --json | jq -r '.bytes')
+            LOCAL_SIZE=$(stat -c %s "${LOCAL_BACKUP_PATH}")
+
+            if [[ "$REMOTE_SIZE" != "$LOCAL_SIZE" ]]; then
+              echo "❌ 错误: 文件大小不匹配 (远程: $REMOTE_SIZE, 本地: $LOCAL_SIZE)"
+              exit 1
             fi
-            echo "--- [后台任务] ✅ 任务成功完成 ---"
-          ) > ${BG_LOG_FILE} 2>&1 &
-          CHROOT_SETUP_PID=$!
-          
-          # 前台任务：部署 Python 应用
-          echo "--- [前台任务] 后台正在恢复 Chroot，前台开始部署 Python 应用... ---"
-          npm install -g pm2
-          cd chatgpt-on-wechat
-          python -m pip install --upgrade pip
-          pip install -r requirements-optional.txt --target ./ || true
-          pip install -r requirements.txt --target ./ || true
-          pm2 start "python3 app.py" --name "python-app"
-          
-          echo "--- [前台任务] ✅ Python 应用已启动。等待后台 Chroot 任务完成... ---"
-          if ! wait ${CHROOT_SETUP_PID}; then
-            echo "=================================================" >&2; echo "❌ ERROR: 后台 Chroot 设置任务失败！" >&2; echo "以下是后台任务的详细日志：" >&2; echo "-------------------------------------------------" >&2; cat ${BG_LOG_FILE} >&2; echo "=================================================" >&2; exit 1
+
+            echo "--- ✅ 下载完成。开始解压并恢复系统 ---"
+
+            # 根据扩展名选择解压方式
+            if [[ "${{ env.BACKUP_FILENAME }}" == *.zst ]]; then
+              echo "   -> 使用 zstd 解压..."
+              unzstd -c "${LOCAL_BACKUP_PATH}" | sudo tar -xpf - -C ${{ env.CHROOT_DIR}}
+            elif [[ "${{ env.BACKUP_FILENAME }}" == *.gz ]]; then
+              echo "   -> 使用 pigz 解压..."
+              pigz -dc "${LOCAL_BACKUP_PATH}" | sudo tar -xpf - -C ${{ env.CHROOT_DIR}}
+            else
+              echo "❌ 错误: 不支持的压缩格式"
+              exit 1
+            fi
+
+            # 清理临时文件
+            rm -f "${LOCAL_BACKUP_PATH}"
+
+            echo "3. 验证系统完整性..."
+            if [[ ! -f "${{ env.CHROOT_DIR }}/etc/os-release" ]]; then
+              echo "❌ 错误: 恢复后缺少关键系统文件 /etc/os-release"
+              exit 1
+            fi
+
+            echo "restored=true" >> $GITHUB_OUTPUT
+          else
+            echo "--- ⚠️ 未找到指定备份文件 (${{ env.BACKUP_FILENAME }}) ---"
+            echo "restored=false" >> $GITHUB_OUTPUT
           fi
-          
-          echo "--- ✅ 所有并行任务完成 ---"
-          if [[ -f "${{ env.CHROOT_DIR }}/etc/debian_version" ]]; then echo "restored=true" >> $GITHUB_OUTPUT; else echo "restored=false" >> $GITHUB_OUTPUT; fi
+
+          echo "--- ✅ Chroot 恢复任务完成 ---"
 
       - name: 7. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}
-          sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
+          sudo mount -t proc proc "${MNT_DIR}/proc"
+          sudo mount -o bind /dev "${MNT_DIR}/dev"
+          sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"
+          sudo mount -o bind /sys "${MNT_DIR}/sys"
 
       - name: 8. [增强] 清理 Chroot 环境空间
         if: steps.restore_or_create.outputs.restored == 'true'
         run: |
           echo "--- 开始深度清理 Chroot 环境 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "set -e; echo '1. 清理 apt 缓存...'; apt-get clean -y &>/dev/null; apt-get autoclean -y &>/dev/null; apt-get autoremove -y &>/dev/null; rm -rf /var/lib/apt/lists/*; echo '2. 清理通用临时文件和日志...'; rm -rf /tmp/* /var/tmp/*; find /var/log -type f -name '*.log' -delete; find /var/log -type f -name '*.gz' -delete; echo '3. 清理用户缓存和历史记录...'; rm -rf /root/.cache /root/.npm /root/.bash_history; echo '✅ Chroot 环境清理完成。'"
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "set -e; \
+            echo '1. 清理 apt 缓存...'; \
+            apt-get clean -y &>/dev/null; \
+            apt-get autoclean -y &>/dev/null; \
+            apt-get autoremove -y &>/dev/null; \
+            rm -rf /var/lib/apt/lists/*; \
+            echo '2. 清理通用临时文件和日志...'; \
+            rm -rf /tmp/* /var/tmp/*; \
+            find /var/log -type f -name '*.log' -delete; \
+            find /var/log -type f -name '*.gz' -delete; \
+            echo '3. 清理用户缓存和历史记录...'; \
+            rm -rf /root/.cache /root/.npm /root/.bash_history; \
+            echo '✅ Chroot 环境清理完成。'"
 
       - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
         # 仅在 'restored' 成功, 'run_startup_script' 启用, 且 'enable_ssh' 未启用的情况下运行
@@ -143,7 +202,7 @@ jobs:
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
           # 使用 tee 和 here-document 创建启动脚本
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
           # --- 动态传入所有开关和配置 ---
@@ -165,19 +224,63 @@ jobs:
 
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
           if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
-          
-          if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
-          if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
-          if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
-          if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
-          if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
-          if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
+
+          if [[ "$RUN_LAUNCHER" == "true" ]]; then
+            echo "2. 启动 launcher..."
+            [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"
+          else
+            echo "2. [已禁用] 跳过 launcher。"
+          fi
+
+          if [[ "$RUN_REDIS" == "true" ]]; then
+            echo "3. 启动 Redis..."
+            command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
+          else
+            echo "3. [已禁用] 跳过 Redis。"
+          fi
+
+          if [[ "$RUN_YUNZAI" == "true" ]]; then
+            echo "4. 启动 Yunzai-Bot..."
+            [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"
+          else
+            echo "4. [已禁用] 跳过 Yunzai-Bot。"
+          fi
+
+          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then
+            echo "5. 启动 loophole..."
+            if [ -f "${HOME_DIR}/loophole/loophole" ]; then
+              cd "${HOME_DIR}/loophole"
+              pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"
+              if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then
+                echo "  -> 启用 Napcat 隧道..."
+                pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"
+              fi
+            else
+              echo "  -> 警告: loophole 未找到。"
+            fi
+          else
+            echo "5. [已禁用] 跳过 loophole。"
+          fi
+
+          if [[ "$RUN_OPENLIST" == "true" ]]; then
+            echo "6. 启动 openlist..."
+            [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"
+          else
+            echo "6. [已禁用] 跳过 openlist。"
+          fi
+
+          if [[ "$RUN_CHMLFRP" == "true" ]]; then
+            echo "7. 启动 ChmlFrp..."
+            [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"
+          else
+            echo "7. [已禁用] 跳过 ChmlFrp。"
+          fi
 
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
           pm2 save && pm2 ls
           EOF
-          
+
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
 
@@ -186,15 +289,20 @@ jobs:
           sleep ${RUNTIME_MINUTES}m
           echo "⏳ 规定运行时间已到。"
 
-
       - name: 9B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
-        with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: 350
 
       - name: 10. 卸载虚拟文件系统
         if: always()
-        run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true; sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true; sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true; sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
+        run: |
+          sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
       - name: 11. ⚡️ 创建固定名称的备份并多线程覆盖上传到 B2
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
