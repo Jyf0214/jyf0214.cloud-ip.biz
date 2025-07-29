@@ -150,7 +150,6 @@ jobs:
           "
 
       - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
-        # [已修正] 增加对 schedule 触发器的判断
         if: >
           steps.restore_or_create.outputs.restored == 'true' &&
           (
@@ -168,14 +167,17 @@ jobs:
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << EOF
           #!/bin/bash
           set -e
-          # --- 动态传入所有开关和配置 ---
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher }}'
-          export RUN_REDIS='${{ github.event.inputs.run_redis }}'
-          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai }}'
-          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav }}'
-          export RUN_OPENLIST='${{ github.event.inputs.run_openlist }}'
-          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp }}'
-          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel }}'
+          # --- 动态传入所有开关和配置 (修正：为 schedule 任务提供默认值 'true') ---
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'
+          
+          # 对于 schedule 时也希望默认为 false 的开关，可以这样写
+          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
+
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
           export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
           export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
@@ -189,6 +191,7 @@ jobs:
           if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
           
+          # 后续的 if 判断逻辑无需修改
           if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
           if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
           if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
