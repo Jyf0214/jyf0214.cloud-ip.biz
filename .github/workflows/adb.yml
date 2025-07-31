@@ -17,20 +17,17 @@ on:
 # 并发控制
 concurrency:
   group: ${{ github.workflow }}
-  cancel-in-progress: true # 每次都全新启动，可以取消正在进行的旧任务
+  cancel-in-progress: true
 
 # 全局环境变量
 env:
-  # --- 安卓环境配置 ---
   AVD_NAME: ${{ github.event.inputs.avd_name }}
   API_LEVEL: ${{ github.event.inputs.api_level }}
   TARGET: ${{ github.event.inputs.target }}
   ARCH: ${{ github.event.inputs.arch }}
   ANDROID_SDK_ROOT: "${{ github.workspace }}/android-sdk"
   AVD_HOME: "${{ github.workspace }}/avd_home"
-
-  # --- Secrets (需要在仓库设置中配置) ---
-  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }} # ngrok 的认证 Token
+  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
 
 jobs:
   build-and-run-android:
@@ -49,30 +46,35 @@ jobs:
         run: |
           echo "Installing dependencies: qemu-kvm, openjdk..."
           sudo apt-get update
-          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils unzip openjdk-11-jdk
+          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils unzip openjdk-11-jdk jq
           echo "Verifying KVM acceleration..."
           sudo kvm-ok
 
-      - name: 4. 安装 Android SDK 并创建全新模拟器
+      - name: 4. 安装 Android SDK 并创建全新模拟器 (已修正)
         run: |
           echo "1. 创建 AVD 和 SDK 目录..."
+          # FIX: 创建一个 'latest' 子目录来存放命令行工具
           mkdir -p ${{ env.AVD_HOME }}
-          mkdir -p ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools
+          mkdir -p ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest
 
           echo "2. 下载并安装 Android SDK 命令行工具..."
           CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
           wget -q -O /tmp/cmdline-tools.zip ${CMDLINE_TOOLS_URL}
-          unzip -q -d ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools /tmp/cmdline-tools.zip
-          # 谷歌的zip包里会有一个顶层目录，需要把里面的内容移出来
-          mv ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/cmdline-tools/* ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/
-          rm -rf ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/cmdline-tools /tmp/cmdline-tools.zip
+          # FIX: 解压到 'latest' 目录中
+          unzip -q -d ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest /tmp/cmdline-tools.zip
+          # FIX: 新的解压路径包含了 cmdline-tools 目录，所以移动路径也需要相应调整
+          mv ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools/* ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/
+          rm -rf ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools /tmp/cmdline-tools.zip
 
           echo "3. 设置 PATH 并接受许可..."
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
-          echo "y" | sdkmanager --licenses >/dev/null
+          # FIX: 更新 PATH 以指向新的 'latest/bin' 目录
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          # 现在 sdkmanager 应该能自动找到 SDK root
+          echo "y" | sdkmanager --licenses
 
           echo "4. 使用 sdkmanager 安装所需包..."
-          sdkmanager --install "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
+          # 所有的 sdkmanager 和 avdmanager 命令都会使用上面 export 的 PATH
+          sdkmanager "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
 
           echo "5. 创建一个全新的 AVD (安卓虚拟设备)..."
           echo "no" | avdmanager create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd"
@@ -82,7 +84,8 @@ jobs:
       - name: 5. 启动安卓模拟器 & 暴露无线ADB
         id: start_emulator
         run: |
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          # 将修正后的 PATH 再次应用到这个步骤中
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64/qt/lib
 
           echo "--- 启动安卓模拟器 (后台运行) ---"
@@ -99,9 +102,9 @@ jobs:
           chmod +x ./ngrok
           ./ngrok authtoken ${{ env.NGROK_AUTHTOKEN }}
           ./ngrok tcp 5555 --log=stdout > ngrok.log &
-          sleep 5 # 等待 ngrok 启动
+          sleep 5 
 
-          NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "tcp") | .public_url')
 
           echo "================================================================"
           echo "✅ 无线 ADB 已就绪!"
@@ -127,7 +130,7 @@ jobs:
       - name: 7. [清理] 关闭模拟器和隧道
         if: always()
         run: |
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:$PATH"
           echo "--- 正在关闭模拟器和 ngrok 隧道 ---"
           adb emu kill || echo "模拟器可能已关闭。"
           killall ngrok || echo "ngrok 进程未找到。"
