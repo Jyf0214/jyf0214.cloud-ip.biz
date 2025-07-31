@@ -50,9 +50,9 @@ jobs:
           echo "Verifying KVM acceleration..."
           sudo kvm-ok
 
-      - name: 4. 安装 Android SDK 并创建全新模拟器
+      - name: 4. 安装、验证并创建模拟器 (终极修正版)
         run: |
-          echo "1. 创建 AVD 和 SDK 目录..."
+          echo "1. 创建目录..."
           mkdir -p ${{ env.AVD_HOME }}
           mkdir -p ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest
 
@@ -63,26 +63,43 @@ jobs:
           mv ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools/* ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/
           rm -rf ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools /tmp/cmdline-tools.zip
 
-          echo "3. 设置 PATH 并接受许可..."
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          echo "3. 设置全局 PATH 并接受许可..."
+          # FIX: 使用 GITHUB_ENV，让 PATH 在所有后续步骤中都可用
+          echo "PATH=${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH" >> $GITHUB_ENV
           yes | sdkmanager --licenses
 
-          echo "4. 使用 sdkmanager 安装所需包..."
-          sdkmanager "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
+          echo "4. [分解安装] 逐个安装核心包..."
+          sdkmanager "platform-tools" --verbose
+          sdkmanager "emulator" --verbose
+          sdkmanager "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --verbose
+          
+          echo "5. [强力验证] 检查系统镜像的完整性..."
+          SYSTEM_IMAGE_PATH="${{ env.ANDROID_SDK_ROOT }}/system-images/android-${{ env.API_LEVEL }}/${{ env.TARGET }}/${{ env.ARCH }}"
+          KERNEL_PATH="${SYSTEM_IMAGE_PATH}/kernel-ranchu"
 
-          echo "5. 创建一个全新的 AVD (安卓虚拟设备)..."
+          echo "--- 将列出系统镜像目录的全部内容以供调试 ---"
+          ls -lR "$SYSTEM_IMAGE_PATH"
+          echo "-------------------------------------------"
+
+          if [ ! -f "$KERNEL_PATH" ]; then
+            echo "::error::致命错误：内核文件 '$KERNEL_PATH' 未找到！"
+            echo "::error::这表明系统镜像未能成功安装。请仔细检查上面 'ls -lR' 的输出和 sdkmanager 的日志。"
+            exit 1
+          fi
+          echo "✅ 内核文件验证成功。"
+
+          echo "6. 创建全新的 AVD..."
           echo "no" | avdmanager --verbose create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd"
           
           echo "--- ✅ 全新模拟器环境已准备就绪 ---"
 
-      - name: 5. 启动安卓模拟器 & 暴露无线ADB (最终修正)
+      - name: 5. 启动安卓模拟器 & 暴露无线ADB
         id: start_emulator
         run: |
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          # 注意：此步骤无需再 export PATH，因为它已由上一步的 GITHUB_ENV 设置
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64/qt/lib
 
           echo "--- 启动安卓模拟器 (后台运行) ---"
-          # FIX: 使用 -sysdir 标志明确告诉模拟器 SDK 的位置
           emulator -sysdir "${{ env.ANDROID_SDK_ROOT }}" -avd "${{ env.AVD_NAME }}" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
 
           echo "--- 等待模拟器完全启动 ---"
@@ -124,7 +141,6 @@ jobs:
       - name: 7. [清理] 关闭模拟器和隧道
         if: always()
         run: |
-          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:$PATH"
           echo "--- 正在关闭模拟器和 ngrok 隧道 ---"
           adb emu kill || echo "模拟器可能已关闭。"
           killall ngrok || echo "ngrok 进程未找到。"
