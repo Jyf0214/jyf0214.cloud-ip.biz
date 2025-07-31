@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Android Emulator (Using Professional Action)
+name: CI with Android Emulator (For Non-KVM Environments)
 
 # 工作流触发器
 on:
@@ -9,7 +9,6 @@ on:
       enable_ssh_debug: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化)?', required: true, type: boolean, default: false }
 
       # --- 安卓模拟器配置 ---
-      avd_name: { description: 'AVD (模拟器) 名称', required: true, type: string, default: 'pixel_6_pro' }
       api_level: { description: '安卓 API 等级 (例如: 29, 30, 33)', required: true, type: string, default: '33' }
       target: { description: '系统镜像类型 (google_apis, default)', required: true, type: string, default: 'google_apis' }
       arch: { description: 'CPU 架构 (x86_64, x86)', required: true, type: string, default: 'x86_64' }
@@ -21,38 +20,39 @@ concurrency:
 
 # 全局环境变量
 env:
-  # 注意：这些变量现在主要给 ngrok 和我们自己参考，模拟器 Action 会直接使用 inputs
-  AVD_NAME: ${{ github.event.inputs.avd_name }}
   API_LEVEL: ${{ github.event.inputs.api_level }}
   NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
 
 jobs:
   build-and-run-android:
-    name: "Run Android Emulator via Professional Action"
+    name: "Run Android Emulator in Non-KVM Environment"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出代码
         uses: actions/checkout@v4
       
-      # Java (JDK) 是安卓模拟器的前提依赖
       - name: 2. 设置 Java 环境
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17' # 推荐使用较新的 JDK 版本
+          java-version: '17'
 
-      - name: 3. ✅ [核心] 启动安卓模拟器
+      - name: 3. ✅ [核心] 启动安卓模拟器 (已适配无硬件加速环境)
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          # --- 传入我们的配置 ---
+          # --- 基础配置 ---
           api-level: ${{ env.API_LEVEL }}
           target: ${{ github.event.inputs.target }}
           arch: ${{ github.event.inputs.arch }}
-          avd-name: ${{ env.AVD_NAME }}
           
-          # --- Action 核心配置 ---
-          script: adb wait-for-device shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done;' # 等待模拟器完全启动后，此步骤才算完成
-          # 模拟器将在后台继续运行，供后续步骤使用
+          # --- 针对无 KVM 环境的优化配置 ---
+          emulator-options: "-no-window -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect"
+          
+          # --- 增加启动脚本的超时时间 ---
+          script-timeout: 900 # 增加到 15 分钟 (900秒)
+          
+          # --- 等待模拟器完全启动的脚本 ---
+          script: adb wait-for-device shell 'while [[ -z $(getprop sys.boot_completed) ]]; do echo "waiting for boot..."; sleep 5; done; input keyevent 82'
 
       - name: 4. 暴露无线ADB (ngrok)
         id: start_ngrok
@@ -66,9 +66,8 @@ jobs:
           chmod +x ./ngrok
           ./ngrok authtoken ${{ env.NGROK_AUTHTOKEN }}
           
-          # 在后台启动 ngrok 并将连接信息输出到文件
           ./ngrok tcp 5555 --log=stdout > ngrok.log &
-          sleep 5 # 等待 ngrok 启动
+          sleep 5 
 
           NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.proto == "tcp") | .public_url')
 
