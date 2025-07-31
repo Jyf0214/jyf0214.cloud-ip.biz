@@ -50,7 +50,7 @@ jobs:
           echo "Verifying KVM acceleration..."
           sudo kvm-ok
 
-      - name: 4. 安装 Android SDK 并创建全新模拟器 (再次修正)
+      - name: 4. 安装 Android SDK 并创建全新模拟器
         run: |
           echo "1. 创建 AVD 和 SDK 目录..."
           mkdir -p ${{ env.AVD_HOME }}
@@ -65,27 +65,25 @@ jobs:
 
           echo "3. 设置 PATH 并接受许可..."
           export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
-          
-          # 使用 'yes' 命令自动接受所有许可证。工具会通过 ANDROID_SDK_ROOT 环境变量找到 SDK。
           yes | sdkmanager --licenses
 
           echo "4. 使用 sdkmanager 安装所需包..."
           sdkmanager "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
 
           echo "5. 创建一个全新的 AVD (安卓虚拟设备)..."
-          # FIX: 移除 --sdk_root 标志，avdmanager 不支持此标志。
           echo "no" | avdmanager --verbose create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd"
           
           echo "--- ✅ 全新模拟器环境已准备就绪 ---"
 
-      - name: 5. 启动安卓模拟器 & 暴露无线ADB
+      - name: 5. 启动安卓模拟器 & 暴露无线ADB (最终修正)
         id: start_emulator
         run: |
           export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64/qt/lib
 
           echo "--- 启动安卓模拟器 (后台运行) ---"
-          emulator -avd "${{ env.AVD_NAME }}" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
+          # FIX: 使用 -sysdir 标志明确告诉模拟器 SDK 的位置
+          emulator -sysdir "${{ env.ANDROID_SDK_ROOT }}" -avd "${{ env.AVD_NAME }}" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
 
           echo "--- 等待模拟器完全启动 ---"
           adb wait-for-device shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done;'
