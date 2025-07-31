@@ -1,282 +1,70 @@
 # 工作流名称
-name: CI with Persistent Environment (Windows + WSL + RDP - ZSTD v3)
+name: Windows Remote Session (RDP via Ngrok)
 
 # 工作流触发器
 on:
-  workflow_dispatch:
-    inputs:
-      # --- 核心控制开关 ---
-      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: false }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行WSL内的服务启动脚本?', required: true, type: boolean, default: true }
-      enable_rdp_access: { description: '🤫 [调试] 是否启用RDP远程桌面 (将暂停自动化)?', required: true, type: boolean, default: false }
+  workflow_dispatch: # 允许手动触发
 
-      # --- [新增] 服务独立启动开关 (仅当 "run_startup_script" 为 true 时生效) ---
-      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
-      run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
-      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
-      run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
-      enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
-      run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
-      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
-
-  schedule:
-    - cron: '30 */6 * * *'
-
-# 并发控制
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
-# 全局环境变量
+# 全局环境变量 - 用于存储凭据
 env:
-  # --- WSL 和备份配置 ---
-  WSL_DISTRO_NAME: "Ubuntu-Runner"
-  WSL_INSTALL_DIR: "C:\\wsl-distro"
-  LOCAL_ARCHIVE_PATH: "C:\\temp\\backup.tar"
-  LOCAL_COMPRESSED_PATH: "C:\\temp\\backup.tar.zst"
-  BACKUP_PREFIX: "minisys_wsl_backup_"
-  WEBDAV_REMOTE_PATH: "backup/wsl" # 建议为WSL备份使用独立的子目录
-
-  # --- Rclone 和通用工具配置 ---
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  
-  # --- Secrets ---
-  PAT: ${{ secrets.PAT }}
-  LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
-  LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
-  LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
-  LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
-  WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-  NAPCATUSER: ${{ secrets.NAPCATUSER }}
-  NAPCATPASS: ${{ secrets.NAPCATPASS }}
-  # --- [新增] Windows RDP & Ngrok Secrets ---
-  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
   RDP_USER: ${{ secrets.RDP_USER }}
   RDP_PASS: ${{ secrets.RDP_PASS }}
+  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
 
 jobs:
-  build-and-run-on-windows:
-    name: "Run All Services on Windows (WSL & RDP)"
-    runs-on: windows-latest
+  rdp-session:
+    name: "🚀 启动 Windows 远程桌面会话"
+    runs-on: windows-latest # 关键改动：使用 Windows 运行器
     steps:
       - name: 1. 检出代码
         uses: actions/checkout@v4
 
-      - name: 2. 最大化运行器磁盘空间
+      - name: 2. 准备环境并设置 RDP 账户
         run: |
-          echo "Disabling pagefile to free up space..."
-          wmic pagefileset where name="C:\\pagefile.sys" delete
-          echo "Removing large directories..."
-          Remove-Item -Recurse -Force "C:\Program Files\dotnet"
-          Remove-Item -Recurse -Force "C:\Program Files (x86)\Android"
-          Remove-Item -Recurse -Force "C:\Program Files (x86)\Microsoft Visual Studio"
-          Remove-Item -Recurse -Force "C:\hostedtoolcache\windows"
+          echo "正在为 RDP 创建用户账户..."
+          net user /add "${{ env.RDP_USER }}" "${{ env.RDP_PASS }}"
+          net localgroup "Remote Desktop Users" "${{ env.RDP_USER }}" /add
+          echo "✅ RDP 账户已设置。"
 
-      - name: 3. 安装全部所需依赖 (WSL, Rclone, ZSTD, JQ, Ngrok)
+      - name: 3. 启用远程桌面并配置防火墙
         run: |
-          echo "Installing tools via Chocolatey..."
-          choco install rclone zstd jq ngrok -y
-          echo "Enabling WSL and installing Ubuntu..."
-          wsl --install -d Ubuntu
-          wsl --set-default-version 2
-
-      - name: 4. ⚡️ 智能恢复或创建 WSL 环境
-        id: restore_or_create
-        shell: pwsh
-        run: |
-          New-Item -Path "C:\temp" -ItemType Directory -Force
-          rclone config create webdav webdav url="${{ env.WEBDAV_URL }}" vendor=other user="${{ env.WEBDAV_USER }}" pass="${{ env.WEBDAV_PASS }}"
-          
-          echo "1. 正在查找最新的备份 (优先 .zst, 其次 .gz)..."
-          $LATEST_BACKUP_FILENAME = rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | ConvertFrom-Json | Where-Object { $_.Name -match "minisys_wsl_backup_.*\.tar\.(zst|gz)$" } | Sort-Object -Property ModTime | Select-Object -Last 1 | Select-Object -ExpandProperty Name
-          
-          if ($LATEST_BACKUP_FILENAME) {
-            echo "   -> ✅ 发现最新可用备份: $LATEST_BACKUP_FILENAME"
-            $REMOTE_FILE = "webdav:${{ env.WEBDAV_REMOTE_PATH }}/${LATEST_BACKUP_FILENAME}"
-            
-            # 下载
-            echo "--- ✅ 开始下载备份..."
-            rclone copyto $REMOTE_FILE ${{ env.LOCAL_COMPRESSED_PATH }} ${{ env.RCLONE_FLAGS }}
-            
-            # 解压
-            echo "--- ✅ 下载完成。开始解压..."
-            if ($LATEST_BACKUP_FILENAME.EndsWith(".zst")) {
-              echo "   -> 使用 zstd 进行解压..."
-              zstd -d -f ${{ env.LOCAL_COMPRESSED_PATH }} -o ${{ env.LOCAL_ARCHIVE_PATH }}
-            } else {
-              echo "   -> 使用 pigz (gzip) 进行解压..."
-              tar -xzf ${{ env.LOCAL_COMPRESSED_PATH }} -C C:\temp\
-              # Find the extracted .tar file if the name is not predictable
-              $ExtractedTar = Get-ChildItem -Path C:\temp -Filter *.tar | Select-Object -First 1
-              Move-Item -Path $ExtractedTar.FullName -Destination ${{ env.LOCAL_ARCHIVE_PATH }}
-            }
-
-            # 导入 WSL
-            echo "--- ✅ 解压完成。正在导入到 WSL..."
-            wsl --unregister ${{ env.WSL_DISTRO_NAME }} | Out-Null # Ensure old instance is gone
-            wsl --import ${{ env.WSL_DISTRO_NAME }} ${{ env.WSL_INSTALL_DIR }} ${{ env.LOCAL_ARCHIVE_PATH }}
-            echo "restored=true" >> $env:GITHUB_OUTPUT
-            
-          } else {
-            echo "--- ⚠️ 所有类型的备份均未找到。将重命名默认安装的Ubuntu..."
-            # The default installed Ubuntu becomes our base
-            wsl --unregister ${{ env.WSL_DISTRO_NAME }} | Out-Null
-            wsl --export Ubuntu C:\temp\ubuntu.tar
-            wsl --import ${{ env.WSL_DISTRO_NAME }} ${{ env.WSL_INSTALL_DIR }} C:\temp\ubuntu.tar
-            echo "restored=false" >> $env:GITHUB_OUTPUT
-          }
-          # Set the new/restored distro as default
-          wsl --set-default ${{ env.WSL_DISTRO_NAME }}
-          echo "--- ✅ WSL 环境准备就绪 ---"
-
-      - name: 5. [增强] 清理 WSL 环境空间
-        if: steps.restore_or_create.outputs.restored == 'true'
-        shell: wsl -d ${{ env.WSL_DISTRO_NAME }} -e bash -c
-        run: |
-          set -e
-          echo "--- 开始深度清理 WSL 环境 ---"
-          echo '1. 清理 apt 缓存...'
-          apt-get clean -y > /dev/null 2>&1
-          apt-get autoclean -y > /dev/null 2>&1
-          apt-get autoremove -y > /dev/null 2>&1
-          rm -rf /var/lib/apt/lists/*
-          
-          echo '2. 清理通用临时文件和日志...'
-          rm -rf /tmp/* /var/tmp/*
-          find /var/log -type f -name '*.log' -delete
-          find /var/log -type f -name '*.gz' -delete
-          
-          echo '3. 清理用户缓存和历史记录...'
-          rm -rf /root/.cache /root/.npm /root/.bash_history
-          
-          echo '✅ WSL 环境清理完成。'
-
-      - name: 6A. [自动化路径] 根据开关启动服务并动态暂停
-        if: >
-          github.event.inputs.run_startup_script == 'true' &&
-          github.event.inputs.enable_rdp_access == 'false'
-        shell: pwsh
-        run: |
-          $RUNTIME_MINUTES = if ('${{ github.event.inputs.create_backup_on_finish }}' -eq 'true') { 300 } else { 350 }
-          echo "✅ 进入自动化运行模式 (WSL 服务)..."
-          
-          # Create the startup script using PowerShell Here-String
-          $ScriptContent = @"
-          #!/bin/bash
-          set -e
-          # --- 动态传入所有开关和配置 (修正：为 schedule 任务提供默认值 'true') ---
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'
-          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
-
-          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
-          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
-          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
-          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
-          export NAPCATUSER='${{ env.NAPCATUSER }}'
-          export NAPCATPASS='${{ env.NAPCATPASS }}'
-          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
-          HOME_DIR="/root"
-
-          echo "--- [WSL 环境内] 开始执行自动化启动任务 ---"
-          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
-          
-          if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher" --output /dev/null --error /dev/null || pm2 restart "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
-          if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
-          if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app" || pm2 restart "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
-          if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
-          if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
-          if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
-
-          echo "--- [WSL 环境内] 任务派发完成，保存PM2进程列表 ---"
-          pm2 save && pm2 ls
-"@
-          # Execute the script inside WSL
-          wsl -d ${{ env.WSL_DISTRO_NAME }} -e bash -c $ScriptContent
-
-          echo "🚀 服务已根据开关启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟 (备份设置: ${{ github.event.inputs.create_backup_on_finish }}) ..."
-          Start-Sleep -Seconds ($RUNTIME_MINUTES * 60)
-          echo "⏳ 规定运行时间已到。"
-
-      - name: 6B. [手动调试路径] 启用 RDP 和 Ngrok 隧道
-        if: github.event.inputs.enable_rdp_access == 'true'
-        shell: pwsh
-        run: |
-          echo "正在为 RDP 访问配置 Windows..."
-          # 为 RDP 设置防火墙规则
+          echo "正在启用远程桌面服务..."
+          reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+          echo "正在配置防火墙以允许 RDP 连接..."
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
-          # 创建 RDP 用户并添加到用户组
-          net user ${{ env.RDP_USER }} "${{ env.RDP_PASS }}" /add
-          net localgroup "Remote Desktop Users" ${{ env.RDP_USER }} /add
-          
-          echo "================================================================"
-          echo "✅ RDP 配置完成"
-          echo "  Windows 用户名: ${{ env.RDP_USER }}"
-          echo "  Windows 密码:   ${{ env.RDP_PASS }}"
-          echo "  请使用下方的 Ngrok 地址通过 RDP 客户端连接"
-          echo "================================================================"
-          
-          # 启动 Ngrok 隧道
-          ngrok config add-authtoken ${{ env.NGROK_AUTHTOKEN }}
-          Start-Process -FilePath "ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
-          
-          # 等待，让用户有时间连接
-          echo "⏳ 工作流将暂停 350 分钟以供手动调试。请从上方的 ngrok 日志中查找连接地址。"
-          Start-Sleep -Seconds 21000
+          echo "✅ RDP 服务及防火墙已配置。"
 
-      - name: 7. ⚡️ [极速] 创建版本化备份 (WSL Export & zstd) 并清理旧版本
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
-        shell: pwsh
+      - name: 4. 🤫 下载并启动 Ngrok 内网穿透
         run: |
-          echo "--- 1. 停止 WSL 内服务并导出整个 WSL 发行版 ---"
-          wsl -d ${{ env.WSL_DISTRO_NAME }} -e bash -c "command -v pm2 && pm2 stop all"
-          wsl --shutdown
-          Start-Sleep -Seconds 5 # Give time for shutdown
-          wsl --export ${{ env.WSL_DISTRO_NAME }} ${{ env.LOCAL_ARCHIVE_PATH }}
+          echo "正在下载 Ngrok..."
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive ngrok.zip
           
-          echo "--- 2. 使用 zstd (高压缩等级) 创建新的高速备份 ---"
-          $TIMESTAMP = Get-Date -UFormat '%Y%m%d-%H%M%S'
-          $NEW_BACKUP_FILE = "${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
-          echo "新备份文件名: $NEW_BACKUP_FILE"
-          zstd -T0 -15 -f ${{ env.LOCAL_ARCHIVE_PATH }} -o ${{ env.LOCAL_COMPRESSED_PATH }}
+          echo "正在配置 Ngrok Authtoken..."
+          ./ngrok.exe config add-authtoken "${{ env.NGROK_AUTHTOKEN }}"
           
-          echo "--- 3. 上传新备份 ---"
-          rclone rcat webdav:${{ env.WEBDAV_REMOTE_PATH }}/$NEW_BACKUP_FILE - < ${{ env.LOCAL_COMPRESSED_PATH }}
-          echo "✅ 新备份上传成功。"
+          echo "✅ 正在后台启动 Ngrok TCP 隧道..."
+          Start-Process -NoNewWindow ./ngrok.exe "tcp 3389"
+          
+          # 等待几秒钟让 Ngrok 启动并生成 URL
+          Start-Sleep -Seconds 5
+          
+          echo "⏳ Ngrok 隧道已启动。请检查下方的日志获取连接地址。"
 
-          echo "--- 4. 清理旧备份 (保留3个最新, 兼容 gz/zst) ---"
-          $FILES_TO_DELETE = rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | ConvertFrom-Json | Where-Object { $_.Name -match "minisys_wsl_backup_.*\.tar\.(zst|gz)$" } | Sort-Object -Property ModTime | Select-Object -First ([System.Math]::Max(0, (rclone lsjson webdav:${{ env.WEBDAV_REMOTE_PATH }}/ | ConvertFrom-Json).Count - 3)) | Select-Object -ExpandProperty Name
-          
-          if ($FILES_TO_DELETE) {
-            echo "将要删除以下旧备份:"
-            $FILES_TO_DELETE | ForEach-Object { Write-Host $_ }
-            foreach ($file_name in $FILES_TO_DELETE) {
-              $FULL_REMOTE_PATH = "${{ env.WEBDAV_REMOTE_PATH }}/${file_name}"
-              echo "Deleting: $FULL_REMOTE_PATH"
-              rclone deletefile "webdav:${FULL_REMOTE_PATH}"
-            }
-            echo "✅ 旧备份清理完毕。"
-          } else {
-            echo "无需清理，备份数量小于或等于3。"
-          }
-          
-      - name: 8. 清理运行器环境
-        if: always()
-        shell: pwsh
+      - name: 5. 显示连接信息并保持会话
         run: |
-          echo "--- 开始清理运行器环境 ---"
-          # 停止并注销 WSL 实例以释放所有资源
-          wsl --terminate ${{ env.WSL_DISTRO_NAME }} | Out-Null
-          wsl --unregister ${{ env.WSL_DISTRO_NAME }} | Out-Null
-          # 清理临时文件和目录
-          Remove-Item -Recurse -Force ${{ env.WSL_INSTALL_DIR }} -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "C:\temp" -ErrorAction SilentlyContinue
-          choco uninstall rclone zstd jq ngrok -y
-          echo "✅ 运行器清理完成。"
+          echo "正在获取 Ngrok 提供的连接地址..."
+          # 使用 curl 调用 Ngrok 本地 API 获取隧道信息
+          $tunnelInfo = curl.exe http://127.0.0.1:4040/api/tunnels
+          $rdpUrl = ($tunnelInfo | ConvertFrom-Json).tunnels[0].public_url
+          
+          echo "========================================================================="
+          echo "✅ 远程桌面已就绪!"
+          echo "请使用以下信息连接:"
+          echo "   地址 (Address):   $($rdpUrl.replace('tcp://',''))"
+          echo "   用户名 (Username): ${{ env.RDP_USER }}"
+          echo "   密码 (Password):   [请查看您在仓库中设置的 RDP_PASS Secret]"
+          echo "========================================================================="
+          
+          echo "工作流将暂停约 6 小时以保持会话。结束后请手动停止工作流或等待超时。"
+          Start-Sleep -Seconds 21000 # 保持运行，接近 GitHub Actions 的最长作业时间 (6小时)
