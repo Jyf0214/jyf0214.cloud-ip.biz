@@ -53,38 +53,35 @@ jobs:
       - name: 4. 安装 Android SDK 并创建全新模拟器 (已修正)
         run: |
           echo "1. 创建 AVD 和 SDK 目录..."
-          # FIX: 创建一个 'latest' 子目录来存放命令行工具
           mkdir -p ${{ env.AVD_HOME }}
           mkdir -p ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest
 
           echo "2. 下载并安装 Android SDK 命令行工具..."
           CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
           wget -q -O /tmp/cmdline-tools.zip ${CMDLINE_TOOLS_URL}
-          # FIX: 解压到 'latest' 目录中
           unzip -q -d ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest /tmp/cmdline-tools.zip
-          # FIX: 新的解压路径包含了 cmdline-tools 目录，所以移动路径也需要相应调整
           mv ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools/* ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/
           rm -rf ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/cmdline-tools /tmp/cmdline-tools.zip
 
           echo "3. 设置 PATH 并接受许可..."
-          # FIX: 更新 PATH 以指向新的 'latest/bin' 目录
           export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
-          # 现在 sdkmanager 应该能自动找到 SDK root
-          echo "y" | sdkmanager --licenses
+          
+          # FIX: 使用 'yes' 命令来自动接受所有许可证
+          echo "y" | yes | sdkmanager --licenses --sdk_root=${{ env.ANDROID_SDK_ROOT }}
 
           echo "4. 使用 sdkmanager 安装所需包..."
-          # 所有的 sdkmanager 和 avdmanager 命令都会使用上面 export 的 PATH
-          sdkmanager "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
+          # FIX: 为 sdkmanager 命令添加 --sdk_root 标志增加稳定性
+          sdkmanager --install "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --sdk_root=${{ env.ANDROID_SDK_ROOT }}
 
           echo "5. 创建一个全新的 AVD (安卓虚拟设备)..."
-          echo "no" | avdmanager create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd"
+          # FIX: 为 avdmanager 命令添加 --sdk_root 标志增加稳定性
+          echo "no" | avdmanager --verbose create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd" --sdk_root=${{ env.ANDROID_SDK_ROOT }}
           
           echo "--- ✅ 全新模拟器环境已准备就绪 ---"
 
       - name: 5. 启动安卓模拟器 & 暴露无线ADB
         id: start_emulator
         run: |
-          # 将修正后的 PATH 再次应用到这个步骤中
           export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/latest/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64/qt/lib
 
