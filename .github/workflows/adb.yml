@@ -1,0 +1,141 @@
+# 工作流名称
+name: CI with Android Emulator (Ephemeral - No Backup)
+
+# 工作流触发器
+on:
+  workflow_dispatch:
+    inputs:
+      # --- 核心控制开关 ---
+      enable_ssh_debug: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化)?', required: true, type: boolean, default: false }
+
+      # --- 安卓模拟器配置 ---
+      avd_name: { description: 'AVD (模拟器) 名称', required: true, type: string, default: 'pixel_6_pro' }
+      api_level: { description: '安卓 API 等级 (例如: 30, 31, 33)', required: true, type: string, default: '33' }
+      target: { description: '系统镜像类型 (google_apis, default, etc.)', required: true, type: string, default: 'google_apis' }
+      arch: { description: 'CPU 架构 (x86_64, arm64-v8a)', required: true, type: string, default: 'x86_64' }
+
+# 并发控制
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true # 每次都全新启动，可以取消正在进行的旧任务
+
+# 全局环境变量
+env:
+  # --- 安卓环境配置 ---
+  AVD_NAME: ${{ github.event.inputs.avd_name }}
+  API_LEVEL: ${{ github.event.inputs.api_level }}
+  TARGET: ${{ github.event.inputs.target }}
+  ARCH: ${{ github.event.inputs.arch }}
+  ANDROID_SDK_ROOT: "${{ github.workspace }}/android-sdk"
+  AVD_HOME: "${{ github.workspace }}/avd_home"
+
+  # --- Secrets (需要在仓库设置中配置) ---
+  NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }} # ngrok 的认证 Token
+
+jobs:
+  build-and-run-android:
+    name: "Run Fresh Android Emulator"
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 检出代码
+        uses: actions/checkout@v4
+
+      - name: 2. 最大化运行器磁盘空间
+        run: |
+          echo "Maximizing runner disk space..."
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+
+      - name: 3. 安装所需依赖
+        run: |
+          echo "Installing dependencies: qemu-kvm, openjdk..."
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils unzip openjdk-11-jdk
+          echo "Verifying KVM acceleration..."
+          sudo kvm-ok
+
+      - name: 4. 安装 Android SDK 并创建全新模拟器
+        run: |
+          echo "1. 创建 AVD 和 SDK 目录..."
+          mkdir -p ${{ env.AVD_HOME }}
+          mkdir -p ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools
+
+          echo "2. 下载并安装 Android SDK 命令行工具..."
+          CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip"
+          wget -q -O /tmp/cmdline-tools.zip ${CMDLINE_TOOLS_URL}
+          unzip -q -d ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools /tmp/cmdline-tools.zip
+          # 谷歌的zip包里会有一个顶层目录，需要把里面的内容移出来
+          mv ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/cmdline-tools/* ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/
+          rm -rf ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/cmdline-tools /tmp/cmdline-tools.zip
+
+          echo "3. 设置 PATH 并接受许可..."
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          echo "y" | sdkmanager --licenses >/dev/null
+
+          echo "4. 使用 sdkmanager 安装所需包..."
+          sdkmanager --install "platform-tools" "emulator" "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}"
+
+          echo "5. 创建一个全新的 AVD (安卓虚拟设备)..."
+          echo "no" | avdmanager create avd -n "${{ env.AVD_NAME }}" -k "system-images;android-${{ env.API_LEVEL }};${{ env.TARGET }};${{ env.ARCH }}" --device "pixel_6_pro" --path "${{ env.AVD_HOME }}/${{ env.AVD_NAME }}.avd"
+          
+          echo "--- ✅ 全新模拟器环境已准备就绪 ---"
+
+      - name: 5. 启动安卓模拟器 & 暴露无线ADB
+        id: start_emulator
+        run: |
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64:${{ env.ANDROID_SDK_ROOT }}/emulator/lib64/qt/lib
+
+          echo "--- 启动安卓模拟器 (后台运行) ---"
+          emulator -avd "${{ env.AVD_NAME }}" -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
+
+          echo "--- 等待模拟器完全启动 ---"
+          adb wait-for-device shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done;'
+          adb devices
+          echo "✅ 模拟器已启动并准备就绪。"
+
+          echo "--- 启动 ngrok 隧道暴露 ADB 端口 (5555) ---"
+          wget -q https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-linux-amd64.zip -O ngrok.zip
+          unzip ngrok.zip
+          chmod +x ./ngrok
+          ./ngrok authtoken ${{ env.NGROK_AUTHTOKEN }}
+          ./ngrok tcp 5555 --log=stdout > ngrok.log &
+          sleep 5 # 等待 ngrok 启动
+
+          NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+
+          echo "================================================================"
+          echo "✅ 无线 ADB 已就绪!"
+          echo "请使用以下命令从您的本地计算机连接:"
+          echo "   adb connect ${NGROK_URL#tcp://}"
+          echo "================================================================"
+          echo "adb_connect_command=adb connect ${NGROK_URL#tcp://}" >> $GITHUB_OUTPUT
+
+      - name: 6A. [自动化路径] 暂停工作流
+        if: github.event.inputs.enable_ssh_debug == 'false'
+        run: |
+          echo "自动化运行模式。工作流将暂停 350 分钟..."
+          sleep 350m
+          echo "⏳ 规定运行时间已到。"
+
+      - name: 6B. [调试路径] 启用 SSH
+        if: github.event.inputs.enable_ssh_debug == 'true'
+        uses: lhotari/action-upterm@v1
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: 350
+
+      - name: 7. [清理] 关闭模拟器和隧道
+        if: always()
+        run: |
+          export PATH="${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/bin:${{ env.ANDROID_SDK_ROOT }}/platform-tools:${{ env.ANDROID_SDK_ROOT }}/emulator:$PATH"
+          echo "--- 正在关闭模拟器和 ngrok 隧道 ---"
+          adb emu kill || echo "模拟器可能已关闭。"
+          killall ngrok || echo "ngrok 进程未找到。"
+          echo "✅ 清理完成。"
+
+      - name: 8. 清理运行器残留文件
+        if: always()
+        run: |
+          echo "--- 开始清理运行器环境 ---"
+          rm -rf ${{ env.ANDROID_SDK_ROOT }} ${{ env.AVD_HOME }} ngrok ngrok.zip ngrok.log
+          echo "✅ 运行器清理完成。"
