@@ -11,7 +11,7 @@ on:
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       
       # --- [新增] 服务独立启动开关 (仅当 "run_startup_script" 为 true 时生效) ---
-      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: true }
+      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
       run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
