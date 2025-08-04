@@ -26,10 +26,11 @@ jobs:
           # 使用 GitHub 提供的防泄漏邮件地址
           git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           echo "✅ Git user configured"
+          
       # --- 同步到 GitLab (极狐香港站) ---
       # 仅当 GITLAB_TOKEN 被设置时才会运行此步骤
       - name: Sync to GitLab (gitlab.hk)
-        if: secrets.GITLAB_TOKEN != ''
+        if: ${{ secrets.GITLAB_TOKEN != '' }}
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
@@ -41,10 +42,11 @@ jobs:
           git push --all gitlab
           git push --tags gitlab
           echo "✅ Synced to GitLab (gitlab.hk)"
+          
       # --- 同步到 GitCode ---
       # 仅当 GITCODE_TOKEN 被设置时才会运行此步骤
       - name: Sync to GitCode
-        if: secrets.GITCODE_TOKEN != ''
+        if: ${{ secrets.GITCODE_TOKEN != '' }}
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
@@ -56,6 +58,7 @@ jobs:
           git push --all gitcode
           git push --tags gitcode
           echo "✅ Synced to GitCode"
+          
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
