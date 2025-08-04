@@ -1,22 +1,70 @@
-name: Deploy GitHub Pages
+# 工作流程名称
+name: Deploy to GitHub Pages and Sync to other Git Remotes
 
+# 触发器配置
 on:
   push:
     branches:
-      - main  # 替换为你的分支名称
-  workflow_dispatch:
+      - main  # 仅在 main 分支推送时触发
+  workflow_dispatch: # 允许手动触发
 
 jobs:
-  build:
+  # 第一个任务：构建和部署到 GitHub Pages
+  deploy-pages:
+    name: Build and Deploy to GitHub Pages
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout the repository
-      uses: actions/checkout@v2
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./  # 静态文件所在的根目录
+     - name: Set up Git config
+        run: |
+          # 使用触发工作流程的用户作为 Git 用户
+          git config --global user.name "${{ github.actor }}"
+          # 使用 GitHub 提供的防泄漏邮件地址
+          git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          echo "✅ Git user configured"
 
+      # --- 同步到 GitLab (极狐香港站) ---
+      # 仅当 GITLAB_TOKEN 被设置时才会运行此步骤
+      - name: Sync to GitLab (gitlab.hk)
+        if: secrets.GITLAB_TOKEN != ''
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          echo "Syncing to GitLab (gitlab.hk)..."
+          # 使用 github 上下文变量构建 URL
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.hk/${{ github.repository_owner }}/${{ github.event.repository.name }}.git"
+          
+          # 推送所有分支和标签 (非强制)
+          git push --all gitlab
+          git push --tags gitlab
+          echo "✅ Synced to GitLab (gitlab.hk)"
+
+      # --- 同步到 GitCode ---
+      # 仅当 GITCODE_TOKEN 被设置时才会运行此步骤
+      - name: Sync to GitCode
+        if: secrets.GITCODE_TOKEN != ''
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          echo "Syncing to GitCode..."
+          # 使用 github 上下文变量构建 URL
+          git remote add gitcode "https://${{ github.repository_owner }}:${GITCODE_TOKEN}@gitcode.com/${{ github.repository_owner }}/${{ github.event.repository.name }}.git"
+          
+          # 推送所有分支和标签 (非强制)
+          git push --all gitcode
+          git push --tags gitcode
+          echo "✅ Synced to GitCode"
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./  # 您的静态文件所在的根目录, 请根据需要修改
+
+  
+
+      
