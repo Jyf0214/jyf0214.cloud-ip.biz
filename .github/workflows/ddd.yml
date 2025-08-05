@@ -9,7 +9,7 @@ on:
       create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: false }
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
-      
+
       # --- [新增] 服务独立启动开关 (仅当 "run_startup_script" 为 true 时生效) ---
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
@@ -148,6 +148,59 @@ jobs:
             
             echo '✅ Chroot 环境清理完成。'
           "
+          
+      - name: 7.1. [新增] 自动更新 Chroot 内的 OpenList
+        if: steps.restore_or_create.outputs.restored == 'true'
+        run: |
+          echo "--- 将 OpenList 更新脚本写入 Chroot 环境 ---"
+          # 使用 tee 和 here-document 将更新脚本写入 chroot 环境的 /tmp 目录
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
+          #!/usr/bin/env bash
+          set -e
+          
+          # 移动到工作目录 (假设 openlist 可执行文件在 /root 目录下)
+          cd /root
+
+          # 1. 获取最新版本号
+          # 注意：在 chroot 环境中可能没有 curl，但 wget 是更基础的工具
+          # 我们需要先确保 curl 或 wget 和 jq 已安装
+          if ! command -v curl &> /dev/null || ! command -v jq &> /dev/null; then
+            echo "正在安装 curl 和 jq..."
+            apt-get update && apt-get install -y curl jq
+          fi
+          
+          LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r '.tag_name' | head -1)
+
+          # 2. 拼接下载地址
+          ARCH=amd64
+          TARBALL="openlist-linux-${ARCH}.tar.gz"
+          DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
+
+          # 3. 下载
+          echo "Downloading ${DOWNLOAD_URL} ..."
+          # 使用 wget，因为它更可能预装在 minbase 环境中
+          wget -q --show-progress "${DOWNLOAD_URL}"
+
+          # 4. 解压到临时目录
+          TMP_DIR=$(mktemp -d)
+          # 使用 trap 确保临时目录在脚本退出时被清理
+          trap "rm -rf ${TMP_DIR}" EXIT
+          tar -zxf "${TARBALL}" -C "${TMP_DIR}"
+
+          # 5. 直接覆盖当前目录的二进制文件
+          mv "${TMP_DIR}/openlist" ./openlist
+          chmod +x ./openlist
+
+          # 6. 清理
+          rm -f "${TARBALL}"
+          # trap 会自动清理 TMP_DIR
+
+          echo "✅ OpenList(amd64) 已更新至最新版 ${LATEST_TAG}"
+          EOF
+          
+          echo "--- 在 Chroot 环境中执行更新脚本 ---"
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
       - name: 8A. [自动化路径] 根据开关启动服务并动态暂停
         if: >
