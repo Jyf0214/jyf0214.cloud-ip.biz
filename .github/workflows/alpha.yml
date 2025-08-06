@@ -98,7 +98,6 @@ jobs:
           MNT_DIR=${{ env.CHROOT_DIR }}; sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
 
       - name: 10. [增强] 清理与更新 Chroot
-        if: steps.prepare_all.outputs.restored == 'true'
         run: |
           echo "--- 开始深度清理 Chroot 环境 ---"; sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y&&apt-get autoclean -y&&apt-get autoremove -y&&rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.npm"
           echo "--- 自动更新 Chroot 内的 OpenList ---"; sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
