@@ -1,5 +1,5 @@
 # 工作流名称
-name: CI with Persistent Environment (Ultimate Parallel v7.1 - Complete)
+name: CI with Persistent Environment (v7.2 - Debug & Logic Fix)
 
 # 工作流触发器
 on:
@@ -49,7 +49,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (Ultimate Parallel v7.1)"
+    name: "Run All Services (v7.2 - Debug & Logic Fix)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -59,7 +59,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
       - name: 3. 安装基础系统依赖
-        run: sudo apt-get install -y debootstrap rclone pigz zstd jq
+        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
@@ -78,7 +78,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-deps-
 
-      - name: 7. ⚡️ 并行准备：恢复Chroot & 安装依赖 & 安装NodeJS
+      # [重大日志改进] 将所有准备工作并行化，并提供独立的、清晰的日志输出
+      - name: 7. ⚡️ 并行准备 (带独立日志)
         id: prepare_all
         run: |
           CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp); PYTHON_LOG=$(mktemp)
@@ -86,8 +87,11 @@ jobs:
             echo "--- [并行A] 开始: 恢复/创建 Chroot 环境..."
             set -eo pipefail
             sudo mkdir -p ${{ env.CHROOT_DIR }}
+            echo "[并行A] 正在配置 Rclone B2 远程..."
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
             B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+            echo "[并行A] B2 远程路径: ${B2_FULL_PATH}"
+            echo "[并行A] 正在查找最新备份..."
             LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
                 echo "   -> [并行A] 发现备份: ${LATEST_BACKUP_FILENAME}. 正在下载..."
@@ -121,13 +125,25 @@ jobs:
             echo "--- [并行C] ✅ 完成: Python 依赖安装完毕 ---"
           ) > ${PYTHON_LOG} 2>&1 &
           PYTHON_PID=$!
-          echo "⏳ 等待所有并行准备任务完成 (Chroot, Node, Python)..."
+          
+          # --- [日志改进] 独立等待并打印每个任务的日志 ---
+          echo "⏳ 等待并行任务完成..."
           FAIL=0
-          wait ${CHROOT_PID} || { echo "❌ [并行A] Chroot 任务失败!"; FAIL=1; }
-          wait ${NODE_PID} || { echo "❌ [并行B] Node.js 任务失败!"; FAIL=1; }
-          wait ${PYTHON_PID} || { echo "❌ [并行C] Python 任务失败!"; FAIL=1; }
-          echo "--- 详细日志 ---"; echo "--- Chroot Log ---"; cat ${CHROOT_LOG}; echo "--- Node.js Log ---"; cat ${NODE_LOG}; echo "--- Python Log ---"; cat ${PYTHON_LOG}
+          
+          wait ${CHROOT_PID}; CHROOT_EC=$?
+          echo "--- 📜 Chroot 任务日志 ---"; cat ${CHROOT_LOG}
+          if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败 (退出码: $CHROOT_EC)!"; FAIL=1; else echo "✅ [并行A] Chroot 任务成功。"; fi
+          
+          wait ${NODE_PID}; NODE_EC=$?
+          echo "--- 📜 Node.js 任务日志 ---"; cat ${NODE_LOG}
+          if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败 (退出码: $NODE_EC)!"; FAIL=1; else echo "✅ [并行B] Node.js 任务成功。"; fi
+          
+          wait ${PYTHON_PID}; PYTHON_EC=$?
+          echo "--- 📜 Python 依赖任务日志 ---"; cat ${PYTHON_LOG}
+          if [[ $PYTHON_EC -ne 0 ]]; then echo "❌ [并行C] Python 任务失败 (退出码: $PYTHON_EC)!"; FAIL=1; else echo "✅ [并行C] Python 任务成功。"; fi
+          
           if [[ $FAIL -eq 1 ]]; then echo "一个或多个准备任务失败，终止工作流。"; exit 1; fi
+          
           echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
 
@@ -160,57 +176,35 @@ jobs:
           echo "✅ OpenList 已更新至 ${LATEST_TAG}"; EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
+      # [逻辑修正] 移除了 "steps.prepare_all.outputs.restored == 'true'" 这个不必要的条件
       - name: 11A. [自动化路径] 启动 Chroot 内服务
         if: >
-          steps.prepare_all.outputs.restored == 'true' &&
-          ( github.event_name == 'schedule' || (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false') )
+          github.event_name == 'schedule' || 
+          (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."
-          # [填充] 将完整的启动脚本写入 Chroot 环境
           sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
-          # --- 动态传入所有开关和配置 ---
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'
-          export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'
-          export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
-
-          # --- 传入 Secrets ---
-          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'
-          export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'
-          export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'
-          export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'
-          export NAPCATUSER='${{ env.NAPCATUSER }}'
-          export NAPCATPASS='${{ env.NAPCATPASS }}'
-          
-          # --- 环境设置 ---
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'; export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'; export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
+          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin
           HOME_DIR="/root"
-
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"
           if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           echo "1. 清理旧日志..." && pm2 flush && find \${HOME_DIR} -name "*.log" -type f -delete
-          
-          # --- 根据开关启动各项服务 ---
           if [[ "\$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "\${HOME_DIR}/launcher.sh" ] && (cd "\${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
           if [[ "\$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
           if [[ "\$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "\${HOME_DIR}/Yunzai" ] && (cd "\${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
           if [[ "\$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "\${HOME_DIR}/loophole/loophole" ]; then cd "\${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "\${LOOPHOLE_WEBDAV_USER}" -p "\${LOOPHOLE_WEBDAV_PASS}" --hostname "\${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "\$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
           if [[ "\$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "\${HOME_DIR}/openlist" ] && (cd "\${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
           if [[ "\$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "\${HOME_DIR}/ChmlFrp/frpc" ] && (cd "\${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
-
-          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
-          pm2 save && pm2 ls
-          EOF
+          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
+EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-          echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."
-          sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
+          echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
 
       - name: 11B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
@@ -246,7 +240,6 @@ jobs:
         if: always()
         run: |
           echo "--- 开始清理运行器环境 ---"
-          sudo rm -rf ${{ env.CHROOT_DIR }}
-          sudo npm cache clean --force || true
-          pip cache purge || true
+          sudo rm -rf ${{ env.CHROOT_DIR }}; rm -rf chatgpt-on-wechat
+          sudo npm cache clean --force || true; pip cache purge || true
           echo "✅ 运行器清理完成。"
