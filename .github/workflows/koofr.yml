@@ -1,113 +1,95 @@
 # 工作流名称
-name: Sync Latest Backup from WebDAV to B2
+name: 'Migration: Sync WebDAV to B2'
 
-# 工作流触发器：手动触发 (workflow_dispatch)，无需任何输入
+# 工作流触发器
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '🧪 是否启用演练模式 (Dry Run)? (只会显示将要传输的文件，不会实际操作)'
+        required: true
+        type: boolean
+        default: true
 
 # 全局环境变量
 env:
-  # --- WebDAV 源配置 ---
-  WEBDAV_REMOTE_NAME: origin_webdav
+  # Rclone 远程的内部名称 (可自定义)
+  WEBDAV_REMOTE_NAME: "webdav_source"
+  B2_REMOTE_NAME: "b2_destination"
+
+  # 备份文件所在的目录 (假设两边都叫 'backup')
+  REMOTE_PATH: "backup"
+
+  # WebDAV Secrets
   WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
   WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
   WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-  # 根据您的说明，脚本将访问相对于您 WebDAV_URL 的 "backup" 目录
-  WEBDAV_BACKUP_PATH: "backup"
 
-  # --- Backblaze B2 目标配置 ---
-  B2_REMOTE_NAME: destination_b2
+  # B2 Secrets
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_ACCOUNT_ID: ${{ secrets.B2_ACCOUNT_ID }}
-  B2_ACCOUNT_KEY: ${{ secrets.B2_ACCOUNT_KEY }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
-  B2_BACKUP_DIR: backup # B2 存储桶内的目标目录
+  
+  # Rclone 通用传输参数
+  RCLONE_FLAGS: "--multi-thread-streams 8 --buffer-size 64M --fast-list --transfers 16 --progress"
 
-  # --- 备份管理配置 ---
-  # 注意：现在使用源文件名作为前缀进行匹配
-  BACKUP_PREFIX: "minisys_backup_"
-  BACKUP_RETENTION_COUNT: 2 # 在 B2 上保留的备份数量
-
-# 作业定义
 jobs:
-  transfer-backup-to-b2:
-    # 运行环境
+  migrate-data:
+    name: "Sync Data from WebDAV to B2"
     runs-on: ubuntu-latest
-
-    # 作业步骤
+    
     steps:
-      - name: 1. 安装依赖 (rclone & zstd)
-        run: |
-          echo "正在安装 rclone 和 zstd (用于处理 .zst 文件)..."
-          sudo apt-get update
-          sudo apt-get install -y rclone zstd
-          echo "✅ 依赖安装完毕。"
+      - name: 1. 安装 Rclone
+        run: sudo apt-get update && sudo apt-get install -y rclone
 
-      - name: 2. 配置 rclone 远程存储
+      - name: 2. 配置 Rclone Remotes (WebDAV 和 B2)
         run: |
-          echo "正在配置 WebDAV 和 Backblaze B2 的 rclone 远程..."
-          rclone config create ${{ env.WEBDAV_REMOTE_NAME }} webdav url="${{ env.WEBDAV_URL }}" vendor=other user="${{ env.WEBDAV_USER }}" pass="${{ env.WEBDAV_PASS }}"
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account="${{ env.B2_ACCOUNT_ID }}" key="${{ env.B2_ACCOUNT_KEY }}" download_url="${{ env.B2_DOWNLOAD_URL }}"
-          echo "✅ rclone 远程配置完成。"
+          echo "--- 开始配置 Rclone ---"
+          
+          # 配置 WebDAV 源
+          echo "1. 配置 WebDAV 源: ${{ env.WEBDAV_REMOTE_NAME }}"
+          rclone config create ${{ env.WEBDAV_REMOTE_NAME }} webdav \
+            url "${{ env.WEBDAV_URL }}" \
+            vendor "other" \
+            user "${{ env.WEBDAV_USER }}" \
+            pass "${{ env.WEBDAV_PASS }}"
+
+          # 配置 B2 目标
+          echo "2. 配置 B2 目标: ${{ env.B2_REMOTE_NAME }}"
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
+            account "${{ env.B2_KEY_ID }}" \
+            key "${{ env.B2_APPLICATION_KEY }}"
+
+          echo "✅ Rclone 配置完成。已设置两个远程。"
           rclone listremotes
 
-      - name: 3. 查找并转移最新的备份文件
-        id: transfer
+      - name: 3. 执行数据同步
         run: |
-          WEBDAV_SOURCE_DIR="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.WEBDAV_BACKUP_PATH }}"
+          SOURCE="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.REMOTE_PATH }}"
+          DESTINATION="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.REMOTE_PATH }}"
           
-          echo "🔎 正在 ${WEBDAV_SOURCE_DIR} 目录中查找最新的备份文件 (.tar.zst)..."
+          echo "同步源: ${SOURCE}"
+          echo "同步目标: ${DESTINATION}"
           
-          # 列出所有 .tar.zst 文件，按名称反向排序（时间戳最新的在最前），然后取第一个
-          LATEST_FILE=$(rclone lsf --format "p" "${WEBDAV_SOURCE_DIR}" | grep '\.tar\.zst$' | sort -r | head -n 1)
-          
-          if [ -z "${LATEST_FILE}" ]; then
-            echo "❌ 错误：在目录 ${WEBDAV_SOURCE_DIR} 中未找到任何 .tar.zst 格式的备份文件！"
-            exit 1
-          fi
-          
-          echo "✅ 找到最新备份文件: ${LATEST_FILE}"
-
-          WEBDAV_SOURCE_FILE="${WEBDAV_SOURCE_DIR}/${LATEST_FILE}"
-          # 目标文件名与源文件名保持一致，以保留时间戳信息
-          B2_DESTINATION_FILE="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}/${LATEST_FILE}"
-
-          echo "🚀 准备就绪，正在从 WebDAV 传输文件到 Backblaze B2..."
-          echo "   -> 源: ${WEBDAV_SOURCE_FILE}"
-          echo "   -> 目标: ${B2_DESTINATION_FILE}"
-
-          # 使用 copyto 进行直接文件到文件的传输
-          rclone copyto "${WEBDAV_SOURCE_FILE}" "${B2_DESTINATION_FILE}" --progress
-          
-          echo "✅ 文件成功传输到 B2！"
-          # 输出 B2 目录用于下一步清理
-          echo "b2_backup_dir=${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_BACKUP_DIR }}" >> $GITHUB_OUTPUT
-
-
-      - name: 4. 清理 B2 上的旧备份
-        if: success() && steps.transfer.outputs.b2_backup_dir
-        run: |
-          B2_TARGET_DIR="${{ steps.transfer.outputs.b2_backup_dir }}"
-          RETENTION_COUNT=${{ env.BACKUP_RETENTION_COUNT }}
-          
-          echo "🧹 开始清理 Backblaze B2 上的旧备份 (${B2_TARGET_DIR})..."
-          echo "    将保留最新的 ${RETENTION_COUNT} 个备份。"
-
-          # 列出所有匹配前缀的备份文件，排序后，保留最新的N个，其余的用于删除
-          FILES_TO_DELETE=$(rclone lsf --format "p" "${B2_TARGET_DIR}" | grep "^${{ env.BACKUP_PREFIX }}" | sort | head -n -${RETENTION_COUNT})
-          
-          if [ -z "${FILES_TO_DELETE}" ]; then
-            echo "ℹ️ 当前备份数量未超过限制，无需清理。"
+          # 根据输入参数决定是否为演练模式
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+            echo "--- 🧪 演练模式 (DRY RUN) ---"
+            echo "以下文件将会被同步，但不会执行实际操作："
+            rclone sync "${SOURCE}" "${DESTINATION}" --dry-run ${{ env.RCLONE_FLAGS }}
           else
-            echo "🗑️ 以下旧备份将被删除："
-            echo "${FILES_TO_DELETE}"
-            
-            # 逐个删除旧文件
-            echo "${FILES_TO_DELETE}" | while read file; do
-              rclone delete "${B2_TARGET_DIR}/${file}" -v
-            done
-            echo "✅ 旧备份清理完成。"
+            echo "--- 🚀 实时同步模式 (LIVE RUN) ---"
+            echo "警告：现在将开始实际的文件传输！"
+            rclone sync "${SOURCE}" "${DESTINATION}" ${{ env.RCLONE_FLAGS }}
+            echo "✅ 同步操作执行完毕。"
           fi
 
-          echo "📊 当前 B2 上的备份列表："
-          rclone lsf "${B2_TARGET_DIR}" | grep "^${{ env.BACKUP_PREFIX }}"
+      - name: 4. [可选] 验证同步结果
+        if: github.event.inputs.dry_run == 'false' # 仅在真实同步后才验证
+        run: |
+          echo "--- 开始验证同步结果 ---"
+          SOURCE="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.REMOTE_PATH }}"
+          DESTINATION="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.REMOTE_PATH }}"
+          
+          # rclone check 会比较源和目标的文件，如果一致则成功退出
+          rclone check "${SOURCE}" "${DESTINATION}" --one-way --progress
+          echo "✅ 验证完成，两边文件一致！"
