@@ -49,7 +49,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
       - name: 3. 安装基础系统依赖
-        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
+        run: sudo apt-get install -y debootstrap rclone pigz zstd jq
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
