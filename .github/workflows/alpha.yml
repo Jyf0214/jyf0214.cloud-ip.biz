@@ -207,7 +207,7 @@ jobs:
 
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"
           pm2 save && pm2 ls
-EOF
+          EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."
           sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
