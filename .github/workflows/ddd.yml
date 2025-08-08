@@ -155,7 +155,7 @@ jobs:
           github.event_name == 'schedule' || 
           (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
-          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 300 || 350 }}
+          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 90 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
