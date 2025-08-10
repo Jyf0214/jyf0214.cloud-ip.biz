@@ -1,5 +1,5 @@
 # 工作流名称
-name: Run OpenList and Veiled Journeys Downloader (Encrypted)
+name: Run OpenList and Veiled Journeys Downloader (Encrypted with Secrets)
 
 # 工作流触发器：手动触发 (workflow_dispatch)
 on:
@@ -7,7 +7,6 @@ on:
 
 # 全局环境变量
 env:
-  # 注意：使用了 GitCode 的 PAT，因为加密仓库通常存放在这里
   GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} 
 
 # 作业定义
@@ -23,12 +22,8 @@ jobs:
           echo "正在安装基础 Python 包..."
           sudo apt-get update
           pip install --upgrade pip
-          # 注意：这里只安装运行解密和克隆脚本本身所需的最少依赖
-          # 仓库内的具体依赖将通过 requirements.txt 安装
           pip install requests tqdm py7zr webdavclient3 raffle upstash-redis
           echo "✅ 基础依赖安装完毕。"
-
-      # --- 加密流程开始 ---
 
       - name: 2. 克隆加密的 veiled-journeys 仓库 (Clone Encrypted Repository)
         run: |
@@ -37,7 +32,6 @@ jobs:
           echo "✅ 仓库克隆完毕。"
 
       - name: 3. 安装仓库特定的 Python 依赖 (Install Repo-specific Requirements)
-        # 此步骤运行在克隆下来的仓库目录中
         working-directory: ./veiled-journeys
         run: |
           echo "正在安装 requirements.txt 中定义的依赖..."
@@ -45,10 +39,8 @@ jobs:
           echo "✅ 仓库依赖安装完毕。"
 
       - name: 4. 启动会话 - 解密脚本 (Start Session - Decrypt Scripts)
-        # 此步骤同样在仓库目录中运行
         working-directory: ./veiled-journeys
         env:
-          # 需要在仓库的 Secrets 中配置 Jyf0214_PASSWORD
           Jyf0214_PASSWORD: ${{ secrets.Jyf0214_PASSWORD }}
         run: |
           echo "正在运行解密程序..."
@@ -56,19 +48,43 @@ jobs:
           echo "✅ 脚本已解密到临时目录。"
 
       - name: 5. 运行 Kemono 下载器 (Run Kemono Downloader)
+        # --- 修改点：注入所有服务凭据作为环境变量 ---
+        env:
+          # Sushang WebDAV
+          SUSHANG_WEBDAV_USERNAME: ${{ secrets.SUSHANG_WEBDAV_USERNAME }}
+          SUSHANG_WEBDAV_PASSWORD: ${{ secrets.SUSHANG_WEBDAV_PASSWORD }}
+
+          # GoFile API
+          GOFILE_API_TOKEN: ${{ secrets.GOFILE_API_TOKEN }}
+
+          # Jike TeraCloud WebDAV
+          JIKE_WEBDAV_USERNAME: ${{ secrets.JIKE_WEBDAV_USERNAME }}
+          JIKE_WEBDAV_PASSWORD: ${{ secrets.JIKE_WEBDAV_PASSWORD }}
+
+          # Upstash Redis
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+
+          # Yandex WebDAV
+          YANDEX_WEBDAV_USERNAME: ${{ secrets.YANDEX_WEBDAV_USERNAME }}
+          YANDEX_WEBDAV_PASSWORD: ${{ secrets.YANDEX_WEBDAV_PASSWORD }}
+          
+          # Koofr WebDAV
+          # 注意：即使 Koofr 的 URL 不是秘密，但将其作为环境变量传入可以增加灵活性
+          KOOFR_WEBDAV_BASE_URL: ${{ secrets.KOOFR_WEBDAV_BASE_URL }}
+          KOOFR_WEBDAV_USERNAME: ${{ secrets.KOOFR_WEBDAV_USERNAME }}
+          KOOFR_WEBDAV_PASSWORD: ${{ secrets.KOOFR_WEBDAV_PASSWORD }}
         run: |
-          echo "正在运行 Kemono 下载器..."
-          # 注意：调用的是解密后路径下的脚本
+          echo "正在运行 Kemono 下载器 (已加载所有凭据)..."
+          # 调用解密后路径下的脚本
+          # 该脚本现在可以从环境变量中读取所有服务的配置
           python veiled-journeys/Jyf0214/kemono_downloader.py
           echo "✅ Kemono 下载器执行完毕。"
 
       - name: 6. 清理会话 - 移除解密后的文件 (Cleanup Session - Remove Decrypted Files)
-        # 使用 if: always() 确保此步骤无论之前是否成功都会执行
         if: always()
         working-directory: ./veiled-journeys
         run: |
           echo "正在执行清理程序，移除明文脚本..."
           python main.py cleanup
           echo "✅ 清理完成。"
-
-      # --- 加密流程结束 ---
