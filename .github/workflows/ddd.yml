@@ -1,9 +1,11 @@
-name: CI with Persistent Environment (v7.5 - Serialized Deps & MAA & Dual B2)
+name: CI with Persistent Environment (v7.6 - Separated Backup Controls)
 
 on:
   workflow_dispatch:
     inputs:
-      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: false }
+      # [核心变更] 将单个备份选项拆分为两个独立的选项
+      create_backup_b2_primary: { description: '✅ [备份] 是否在结束时创建 B2-1 (主) 备份?', required: true, type: boolean, default: false }
+      create_backup_b2_secondary: { description: '✅ [备份] 是否在结束时创建 B2-2 (副) 备份?', required: true, type: boolean, default: false }
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
@@ -32,7 +34,7 @@ env:
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
 
-  # --- [新增] 存储配置 2 (副) ---
+  # --- 存储配置 2 (副) ---
   BACKUP_PREFIX_2: minisys_backup_secondary_
   B2_REMOTE_NAME_2: "b2_storage_2"
   B2_REMOTE_PATH_2: "backup_secondary"
@@ -51,7 +53,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.5 - Serialized Deps & MAA & Dual B2)"
+    name: "Run All Services (v7.6 - Separated Backup Controls)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -87,13 +89,10 @@ jobs:
           CHROOT_PID=$!
           ( echo "--- [并行B] 开始: 安装 Node.js & PM2..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [并行B] ✅ 完成: Node.js & PM2 安装完毕 ---"; ) > ${NODE_LOG} 2>&1 &
           NODE_PID=$!
-          
           echo "⏳ 等待并行任务完成..."; FAIL=0
           wait ${CHROOT_PID}; CHROOT_EC=$?; echo "--- 📜 Chroot 任务日志 ---"; cat ${CHROOT_LOG}; if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败 (退出码: $CHROOT_EC)!"; FAIL=1; else echo "✅ [并行A] Chroot 任务成功。"; fi
           wait ${NODE_PID}; NODE_EC=$?; echo "--- 📜 Node.js 任务日志 ---"; cat ${NODE_LOG}; if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败 (退出码: $NODE_EC)!"; FAIL=1; else echo "✅ [并行B] Node.js 任务成功。"; fi
-          
           if [[ $FAIL -eq 1 ]]; then echo "一个或多个准备任务失败，终止工作流。"; exit 1; fi
-          
           echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
 
@@ -109,12 +108,10 @@ jobs:
         run: |
           echo "--- 开始深度清理 Chroot 环境 ---"
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.npm"
-          
           echo "--- 自动更新 Chroot 内的 OpenList ---"
           sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
           #!/usr/bin/env bash
-          set -e
-          cd /root
+          set -e; cd /root
           echo "[OpenList Updater] Updating apt sources and installing curl/jq..."
           apt-get update >/dev/null && apt-get install -y curl jq >/dev/null
           echo "[OpenList Updater] Fetching the latest release tag..."
@@ -125,71 +122,33 @@ jobs:
           wget -qO "${TARBALL}" "${DOWNLOAD_URL}"
           TMP_DIR=$(mktemp -d); trap "rm -rf ${TMP_DIR}" EXIT
           echo "[OpenList Updater] Extracting and installing..."
-          tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist
-          rm -f "${TARBALL}"
+          tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist; rm -f "${TARBALL}"
           echo "✅ OpenList 已成功更新至 ${LATEST_TAG}"
           EOF
-          
           echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
       - name: 11. [新增] 安装或更新 MAA 环境
         run: |
           echo "--- 准备 MAA 安装/更新脚本 ---"
           sudo tee ${{ env.CHROOT_DIR }}/tmp/install_maa.sh > /dev/null << 'EOF'
           #!/bin/bash
-          set -e
-          
-          # 从环境变量中获取恢复状态
-          IS_RESTORED="${1}"
-          MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"
-          
-          # 设置非交互式模式，避免apt卡住
-          export DEBIAN_FRONTEND=noninteractive
-          
-          echo "[MAA Installer] 开始执行..."
-          
-          # 下载并解压
-          echo "[MAA Installer] 正在从 ${MAA_CLI_URL} 下载最新的 MAA CLI..."
-          cd /tmp
-          curl -L "${MAA_CLI_URL}" | tar -xz
-          
-          # 移动主程序到系统路径
-          echo "[MAA Installer] 正在安装 'maa' 到 /usr/local/bin/..."
-          mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/
-          
-          if [[ "${IS_RESTORED}" == "true" ]]; then
-            # 如果是恢复的环境，执行升级
-            echo "[MAA Installer] 检测到恢复环境，执行 'maa update'..."
-            maa update
-          else
-            # 如果是全新环境，执行首次安装
-            echo "[MAA Installer] 检测到全新环境，执行首次安装..."
-            echo "[MAA Installer] 正在更新 apt 并安装 adb..."
-            apt-get update -y && apt-get install -y adb
-            echo "[MAA Installer] 正在执行 'maa install'..."
-            maa install
-          fi
-          
-          # 清理产生的临时文件和目录
-          echo "[MAA Installer] 清理临时文件..."
-          rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu
-          
-          echo "✅ MAA 环境已成功配置！"
+          set -e; IS_RESTORED="${1}"; MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"
+          export DEBIAN_FRONTEND=noninteractive; echo "[MAA Installer] 开始执行..."
+          echo "[MAA Installer] 正在从 ${MAA_CLI_URL} 下载最新的 MAA CLI..."; cd /tmp; curl -L "${MAA_CLI_URL}" | tar -xz
+          echo "[MAA Installer] 正在安装 'maa' 到 /usr/local/bin/..."; mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/
+          if [[ "${IS_RESTORED}" == "true" ]]; then echo "[MAA Installer] 检测到恢复环境，执行 'maa update'..."; maa update
+          else echo "[MAA Installer] 检测到全新环境，执行首次安装..."; echo "[MAA Installer] 正在更新 apt 并安装 adb..."; apt-get update -y && apt-get install -y adb; echo "[MAA Installer] 正在执行 'maa install'..."; maa install; fi
+          echo "[MAA Installer] 清理临时文件..."; rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu; echo "✅ MAA 环境已成功配置！"
           EOF
-
           echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/install_maa.sh
-          # 将恢复状态作为参数传递给脚本
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/install_maa.sh "${{ steps.prepare_all.outputs.restored }}"
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/install_maa.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/install_maa.sh "${{ steps.prepare_all.outputs.restored }}"
 
       - name: 12A. [自动化路径] 启动 Chroot 内服务
-        if: >
-          github.event_name == 'schedule' || 
-          (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
+        if: github.event_name == 'schedule' || (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
-          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 90 || 350 }}
+          # [核心变更] 根据任一备份选项是否开启来决定运行时长
+          RUNTIME_MINUTES: ${{ (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true' || github.event.inputs.create_backup_b2_secondary == 'true') && 90 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
@@ -220,7 +179,8 @@ jobs:
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
       - name: 14. ⚡️ [极速] 创建版本化备份至 B2-1 (主)
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
+        # [核心变更] 使用新的输入 'create_backup_b2_primary'。定时任务(schedule)时总是执行
+        if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true')
         run: |
           echo "--- 1. 使用 zstd-19 创建主备份并上传至 B2-1 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
@@ -233,10 +193,10 @@ jobs:
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的主备份清理完毕。"; else echo "无需清理，主备份数量小于或等于2。"; fi
 
       - name: 15. [新增] ⚡️ 创建版本化备份至 B2-2 (副)
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
+        # [核心变更] 使用新的输入 'create_backup_b2_secondary'。定时任务(schedule)时总是执行
+        if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_secondary == 'true')
         run: |
           echo "--- 1. 使用 zstd-19 创建副备份并上传至 B2-2 ---"
-          # 使用新的远程配置、密钥和桶
           rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX_2 }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
