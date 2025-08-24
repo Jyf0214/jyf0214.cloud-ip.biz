@@ -1,42 +1,28 @@
-name: CI with Persistent Environment (v9.3 - B2 Cost & Stability Fix)
+name: CI with Persistent Environment (v7.4-Stable)
 
 on:
   workflow_dispatch:
     inputs:
-      create_backup_b2_primary: { description: '✅ [备份] 是否备份 B2-1 (控制容器)?', required: true, type: boolean, default: false }
-      create_backup_b2_secondary: { description: '✅ [备份] 是否备份 B2-2 (安卓数据)?', required: true, type: boolean, default: false }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行 Chroot 内服务?', required: true, type: boolean, default: true }
-      enable_ssh: { description: '🐞 [调试] 是否启用 SSH 手动调试?', required: true, type: boolean, default: false }
-      run_yunzai: { description: '  - 是否启动 Yunzai (将同时启动Launcher和Napcat)?', type: boolean, default: true }
+      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份?', required: true, type: boolean, default: false }
+      run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
+      enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试?', required: true, type: boolean, default: false }
+      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
+      run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
+      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
-      run_openlist: { description: '  - 是否启动 openlist (将同时启动ChmlFrp)?', type: boolean, default: true }
+      enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
+      run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
+      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 env:
-  # --- 主容器 (Linux Chroot) 配置 ---
   CHROOT_DIR: /mnt/minisys
+  BACKUP_PREFIX: minisys_backup_
   B2_REMOTE_NAME: "b2_storage"
   B2_REMOTE_PATH: "backup"
-  BACKUP_PREFIX: minisys_backup_
-  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
-  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
-
-  # --- 安卓容器 (Redroid Docker) 数据配置 ---
-  REDROID_DATA_DIR: /mnt/redroid_data
-  B2_REMOTE_NAME_2: "b2_storage_2"
-  B2_REMOTE_PATH_2: "backup_android"
-  BACKUP_PREFIX_2: android_data_backup_
-  B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
-  B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
-  B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
-  B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
-
-  # --- 通用配置 ---
   RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
   PAT: ${{ secrets.PAT }}
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
@@ -45,10 +31,15 @@ env:
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
   NAPCATUSER: ${{ secrets.NAPCATUSER }}
   NAPCATPASS: ${{ secrets.NAPCATPASS }}
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  # [费用修正] 确保 B2 下载链接环境变量始终存在
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v9.3 - B2 Cost & Stability Fix)"
+    name: "Run All Services (v7.4-Stable)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -58,11 +49,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
       - name: 3. 安装基础系统依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y debootstrap rclone pigz zstd jq adb
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
+        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
@@ -78,45 +65,51 @@ jobs:
           path: ./chatgpt-on-wechat/lib
           key: ${{ runner.os }}-pip-deps-${{ hashFiles('./chatgpt-on-wechat/requirements.txt', './chatgpt-on-wechat/requirements-optional.txt') }}
 
-      - name: 7. ⚡️ 并行准备并验证
+      - name: 7. [回归] 顺序准备 Chroot 环境和 Node.js
         id: prepare_all
         run: |
-          CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp)
-          # [后台A] 准备 Chroot 控制容器
-          ( set -eo pipefail; echo "--- [后台A] 开始准备 Chroot..."; sudo mkdir -p ${{ env.CHROOT_DIR }}; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; LATEST_BACKUP=$(rclone lsjson ${B1_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name'); if [[ -n "$LATEST_BACKUP" && "$LATEST_BACKUP" != "null" ]]; then echo " -> [后台A] 发现备份，正在恢复..."; rclone copyto "${B1_FULL_PATH}/${LATEST_BACKUP}" /tmp/b1.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b1.tar.zst | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; rm /tmp/b1.tar.zst; echo "restored=true" > /tmp/chroot_status; else echo " -> [后台A] 备份未找到，全新创建..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [后台A] ✅ Chroot 就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
-          CHROOT_PID=$!
-          # [后台B] 安装 Node.js
-          ( set -eo pipefail; echo "--- [后台B] 开始安装 Node.js..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [后台B] ✅ Node.js 就绪 ---"; ) > ${NODE_LOG} 2>&1 &
-          NODE_PID=$!
-          # [前台] 准备 Android 容器
-          set -ex
-          echo "--- [前台] 准备 Android (Redroid) 数据目录... ---"
-          sudo mkdir -p ${{ env.REDROID_DATA_DIR }}
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
-          B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
-          LATEST_ANDROID_BACKUP=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX_2 }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name')
-          if [[ -n "$LATEST_ANDROID_BACKUP" && "$LATEST_ANDROID_BACKUP" != "null" ]]; then echo " -> [前台] 发现安卓备份: ${LATEST_ANDROID_BACKUP}. 正在恢复..."; rclone copyto "${B2_FULL_PATH}/${LATEST_ANDROID_BACKUP}" /tmp/b2.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b2.tar.zst | sudo tar -xpf - -C ${{ env.REDROID_DATA_DIR }}; rm /tmp/b2.tar.zst; else echo " -> [前台] 未找到安卓备份。"; fi
-          echo "--- [前台] 拉取 Redroid 镜像并启动... ---"
-          sudo docker pull redroid/redroid:11.0.0-latest
-          sudo docker run -d --privileged --name redroid11 -v ${{ env.REDROID_DATA_DIR }}:/data -p 5555:5555 redroid/redroid:11.0.0-latest
-          set +ex
-          # [修正] 等待并进行显式验证
-          echo "⏳ 等待所有后台任务完成..."; wait ${CHROOT_PID}; wait ${NODE_PID}
-          echo "--- 📜 Chroot 日志 ---"; cat ${CHROOT_LOG}; echo "--- 📜 Node.js 日志 ---"; cat ${NODE_LOG}
-          echo "--- 最终验证 ---"
-          if ! command -v pm2 &> /dev/null || ! sudo docker --version &> /dev/null; then
-             echo "::error::验证失败: PM2 或 Docker 未能成功安装！"
-             exit 1
+          set -e
+          echo "--- 开始: 恢复或创建 Chroot 环境 (顺序执行) ---"
+          sudo mkdir -p ${{ env.CHROOT_DIR }}
+          # [费用修正] 在 rclone 配置中明确使用 download_url
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
+          B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+          echo "B2 远程路径: ${B2_FULL_PATH}"
+          LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
+          
+          if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
+            echo "-> 发现备份: ${LATEST_BACKUP_FILENAME}. 正在下载..."
+            LOCAL_BACKUP_PATH="/tmp/backup.archive"
+            rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}
+            echo "-> 下载完成. 正在解压..."
+            if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then
+              unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+            else
+              pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}
+            fi
+            rm -f ${LOCAL_BACKUP_PATH}
+            echo "restored=true" >> $GITHUB_OUTPUT
+          else
+            echo "-> 备份未找到. 正在创建全新系统 (debootstrap)..."
+            sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
+            echo "restored=false" >> $GITHUB_OUTPUT
           fi
-          echo "✅ 所有准备任务成功完成!"
-          CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
-      
+          echo "--- ✅ 完成: Chroot 环境准备就绪 ---"
+          
+          echo "--- 开始: 安装 Node.js & PM2 (顺序执行) ---"
+          curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          sudo npm install -g pm2
+          echo "--- ✅ 完成: Node.js & PM2 安装完毕 ---"
+
       - name: 8. 安装依赖并启动 Python 应用
         run: |
           nohup bash -c 'cd chatgpt-on-wechat && python -m pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
+
       - name: 9. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}; sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
+
       - name: 10. [增强] 清理与更新 Chroot
         run: |
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*"
@@ -125,80 +118,54 @@ jobs:
           set -e; cd /root; apt-get update >/dev/null && apt-get install -y curl jq >/dev/null; LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r .tag_name); ARCH=amd64; TARBALL="openlist-linux-${ARCH}.tar.gz"; DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"; wget -qO "${TARBALL}" "${DOWNLOAD_URL}"; TMP_DIR=$(mktemp -d); tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist; rm -f "${TARBALL}"; echo "✅ OpenList 已更新至 ${LATEST_TAG}"
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
-      - name: 11. 安装或更新 MAA 环境
-        run: |
-          sudo tee ${{ env.CHROOT_DIR }}/tmp/install_maa.sh > /dev/null << 'EOF'
-          #!/bin/bash
-          set -e; IS_RESTORED="${1}"; MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"; export DEBIAN_FRONTEND=noninteractive; cd /tmp; curl -L "${MAA_CLI_URL}" | tar -xz; mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/; if [[ "${IS_RESTORED}" == "true" ]]; then maa update; else apt-get update -y && apt-get install -y adb; maa install; fi; rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu;
-          EOF
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/install_maa.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/install_maa.sh "${{ steps.prepare_all.outputs.restored }}"
 
-      - name: 12. 验证 Android (Redroid) 连接
-        run: |
-          echo "--- 等待 Redroid 容器内的 ADB 服务就绪 (最多等待60秒)... ---"
-          for i in {1..12}; do sudo docker logs redroid11 2>&1 | grep "providing adb service" && break; echo "Still waiting..." && sleep 5; done
-          echo "--- 尝试连接到 Redroid ADB... ---"
-          adb connect 127.0.0.1:5555; sleep 2
-          echo "--- 当前 ADB 设备列表: ---"; adb devices
-
-      - name: 13A. [自动化路径] 拉取并执行外部启动脚本
+      - name: 11. [回归] 启动 Chroot 内服务
         if: github.event_name == 'schedule' || (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
-          RUNTIME_MINUTES: ${{ (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true' || github.event.inputs.create_backup_b2_secondary == 'true') && 300 || 350 }}
-          STARTUP_SCRIPT_URL: ${{ secrets.STARTUP_SCRIPT_URL }}
+          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 90 || 350 }}
         run: |
-          echo "--- 从 ${{ env.STARTUP_SCRIPT_URL }} 下载外部启动脚本 ---"
-          sudo curl -sSL -o ${{ env.CHROOT_DIR }}/tmp/startup.sh "${{ env.STARTUP_SCRIPT_URL }}"
-          if [ ! -s "${{ env.CHROOT_DIR }}/tmp/startup.sh" ]; then echo "::error::下载的启动脚本为空或下载失败！请检查 URL 和网络。"; exit 1; fi
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh
-          echo "--- 在 Chroot 环境中执行外部脚本 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
-            export GITHUB_EVENT_NAME='${{ github.event_name }}'; \
-            export INPUT_RUN_YUNZAI='${{ github.event.inputs.run_yunzai }}'; \
-            export INPUT_RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav }}'; \
-            export INPUT_RUN_OPENLIST='${{ github.event.inputs.run_openlist }}'; \
-            export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; \
-            export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; \
-            export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; \
-            export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; \
-            export NAPCATUSER='${{ env.NAPCATUSER }}'; \
-            export NAPCATPASS='${{ env.NAPCATPASS }}'; \
-            /tmp/startup.sh \
-          "
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
+          #!/bin/bash
+          set -e
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'; export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'; export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
+          export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
+          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
+          echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
+          if [[ "$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
+          if [[ "$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
+          if [[ "$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
+          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
+          if [[ "$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
+          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
+          EOF
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
 
-      - name: 13B. [手动调试路径] 启用 SSH
+      - name: 12. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
-      - name: 14. 卸载虚拟文件系统
+      
+      - name: 13. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
-      - name: 15. ⚡️ [备份] Chroot 控制容器至 B2-1
-        if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true')
+      - name: 14. ⚡️ 创建版本化备份
+        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
-          echo "--- 停止服务并创建 Chroot 备份 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'pm2 stop all' || true; pm2 stop python-app || true
+          echo "--- 停止服务并创建备份 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'pm2 stop all' || true; pm2 stop python-app || true
+          # [费用修正] 在 rclone 配置中明确使用 download_url
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
           EXCLUDE_OPTS="--exclude=./tmp --exclude=./var/tmp --exclude=./root/.cache --exclude=./var/cache --exclude=./var/log"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B1_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ Chroot 备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B1_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX }}*" 
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          echo "✅ 新备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B2_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX }}*" 
 
-      - name: 16. [新增] ⚡️ [备份] Android 数据至 B2-2
-        if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_secondary == 'true')
-        run: |
-          echo "--- 创建 Android (Redroid) 数据备份 ---"
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX_2 }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
-          sudo tar -c -f - -C ${{ env.REDROID_DATA_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ Android 数据备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B2_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX_2 }}*"
-
-      - name: 17. 清理运行器残留文件
+      - name: 15. 清理运行器残留文件
         if: always()
         run: |
           echo "--- 开始清理运行器环境 ---"
-          sudo docker stop redroid11 || true
-          sudo docker rm redroid11 || true
-          sudo rm -rf ${{ env.CHROOT_DIR }} ${{ env.REDROID_DATA_DIR }} chatgpt-on-wechat
+          sudo rm -rf ${{ env.CHROOT_DIR }} chatgpt-on-wechat
           sudo npm cache clean --force || true; pip cache purge || true; echo "✅ 运行器清理完成。"
