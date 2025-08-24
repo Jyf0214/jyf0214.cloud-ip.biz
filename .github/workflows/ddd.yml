@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v7.4 - Serialized Python Deps)
+name: CI with Persistent Environment (v7.5 - Serialized Deps & MAA & Dual B2)
 
 on:
   workflow_dispatch:
@@ -20,25 +20,38 @@ concurrency:
   cancel-in-progress: false
 env:
   CHROOT_DIR: /mnt/minisys
+  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
+  PAT: ${{ secrets.PAT }}
+
+  # --- 存储配置 1 (主) ---
   BACKUP_PREFIX: minisys_backup_
   B2_REMOTE_NAME: "b2_storage"
   B2_REMOTE_PATH: "backup"
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  PAT: ${{ secrets.PAT }}
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
+
+  # --- [新增] 存储配置 2 (副) ---
+  BACKUP_PREFIX_2: minisys_backup_secondary_
+  B2_REMOTE_NAME_2: "b2_storage_2"
+  B2_REMOTE_PATH_2: "backup_secondary"
+  B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+  B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+  B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+  B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
+  
+  # --- 服务凭证 ---
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
   LOOPHOLE_NAPCAT_HOSTNAME: ${{ secrets.LOOPHOLE_NAPCAT_HOSTNAME }}
   NAPCATUSER: ${{ secrets.NAPCATUSER }}
   NAPCATPASS: ${{ secrets.NAPCATPASS }}
-  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
-  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.4 - Serialized Python Deps)"
+    name: "Run All Services (v7.5 - Serialized Deps & MAA & Dual B2)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -66,7 +79,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-deps-
 
-      # [逻辑变更] 仅并行准备 Chroot 环境和 Node.js
       - name: 7. ⚡️ 并行准备：恢复Chroot & 安装NodeJS
         id: prepare_all
         run: |
@@ -85,11 +97,9 @@ jobs:
           echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
 
-      # [逻辑变更] 依赖安装和应用启动现在合并在一步
       - name: 8. 安装依赖并启动 Python 应用
         run: |
           nohup bash -c 'echo "--- 开始安装 Python 应用依赖..." && cd chatgpt-on-wechat && python -m pip install --upgrade pip && pip install -r requirements-optional.txt --target ./lib --cache-dir ~/.cache/pip || true && pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip || true && echo "--- ✅ 依赖安装完成。正在启动应用..." && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
-
 
       - name: 9. 挂载虚拟文件系统
         run: |
@@ -101,47 +111,22 @@ jobs:
           sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.npm"
           
           echo "--- 自动更新 Chroot 内的 OpenList ---"
-          # 使用 here-document 将脚本写入 Chroot 环境内的临时文件
           sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
           #!/usr/bin/env bash
           set -e
-          
-          # 移动到目标目录
           cd /root
-          
-          # 安静模式下更新源并安装依赖
           echo "[OpenList Updater] Updating apt sources and installing curl/jq..."
           apt-get update >/dev/null && apt-get install -y curl jq >/dev/null
-          
-          # 获取最新的版本号
           echo "[OpenList Updater] Fetching the latest release tag..."
           LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r '.tag_name' | head -n 1)
-          if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
-            echo "[OpenList Updater] Error: Could not fetch the latest tag." >&2
-            exit 1
-          fi
-          
-          ARCH=amd64
-          TARBALL="openlist-linux-${ARCH}.tar.gz"
-          DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
-          
-          # 下载最新的 OpenList
+          if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then echo "[OpenList Updater] Error: Could not fetch the latest tag." >&2; exit 1; fi
+          ARCH=amd64; TARBALL="openlist-linux-${ARCH}.tar.gz"; DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
           echo "[OpenList Updater] Downloading ${LATEST_TAG} from ${DOWNLOAD_URL}..."
           wget -qO "${TARBALL}" "${DOWNLOAD_URL}"
-          
-          # 创建临时目录用于解压，并设置退出时自动清理
-          TMP_DIR=$(mktemp -d)
-          trap "rm -rf ${TMP_DIR}" EXIT
-          
-          # 解压并移动主程序
+          TMP_DIR=$(mktemp -d); trap "rm -rf ${TMP_DIR}" EXIT
           echo "[OpenList Updater] Extracting and installing..."
-          tar -zxf "${TARBALL}" -C "${TMP_DIR}"
-          mv -f "${TMP_DIR}/openlist" ./openlist
-          chmod +x ./openlist
-          
-          # 清理下载的压缩包
+          tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist
           rm -f "${TARBALL}"
-          
           echo "✅ OpenList 已成功更新至 ${LATEST_TAG}"
           EOF
           
@@ -149,7 +134,57 @@ jobs:
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
-      - name: 11A. [自动化路径] 启动 Chroot 内服务
+      - name: 11. [新增] 安装或更新 MAA 环境
+        run: |
+          echo "--- 准备 MAA 安装/更新脚本 ---"
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/install_maa.sh > /dev/null << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          # 从环境变量中获取恢复状态
+          IS_RESTORED="${1}"
+          MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"
+          
+          # 设置非交互式模式，避免apt卡住
+          export DEBIAN_FRONTEND=noninteractive
+          
+          echo "[MAA Installer] 开始执行..."
+          
+          # 下载并解压
+          echo "[MAA Installer] 正在从 ${MAA_CLI_URL} 下载最新的 MAA CLI..."
+          cd /tmp
+          curl -L "${MAA_CLI_URL}" | tar -xz
+          
+          # 移动主程序到系统路径
+          echo "[MAA Installer] 正在安装 'maa' 到 /usr/local/bin/..."
+          mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/
+          
+          if [[ "${IS_RESTORED}" == "true" ]]; then
+            # 如果是恢复的环境，执行升级
+            echo "[MAA Installer] 检测到恢复环境，执行 'maa update'..."
+            maa update
+          else
+            # 如果是全新环境，执行首次安装
+            echo "[MAA Installer] 检测到全新环境，执行首次安装..."
+            echo "[MAA Installer] 正在更新 apt 并安装 adb..."
+            apt-get update -y && apt-get install -y adb
+            echo "[MAA Installer] 正在执行 'maa install'..."
+            maa install
+          fi
+          
+          # 清理产生的临时文件和目录
+          echo "[MAA Installer] 清理临时文件..."
+          rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu
+          
+          echo "✅ MAA 环境已成功配置！"
+          EOF
+
+          echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/install_maa.sh
+          # 将恢复状态作为参数传递给脚本
+          sudo chroot ${{ env.CHROOT_DIR }} /tmp/install_maa.sh "${{ steps.prepare_all.outputs.restored }}"
+
+      - name: 12A. [自动化路径] 启动 Chroot 内服务
         if: >
           github.event_name == 'schedule' || 
           (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
@@ -175,27 +210,43 @@ jobs:
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
 
-      - name: 11B. [手动调试路径] 启用 SSH
+      - name: 12B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
-      - name: 12. 卸载虚拟文件系统
+
+      - name: 13. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
-      - name: 13. ⚡️ [极速] 创建版本化备份 (zstd-19)
+
+      - name: 14. ⚡️ [极速] 创建版本化备份至 B2-1 (主)
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
-          echo "--- 1. 使用 zstd-19 创建备份并上传至 B2 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
+          echo "--- 1. 使用 zstd-19 创建主备份并上传至 B2-1 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新备份上传成功。"
-          echo "--- 2. 清理 B2 上的旧备份 (保留2个最新) ---"
+          echo "✅ 新的主备份上传成功。"
+          echo "--- 2. 清理 B2-1 上的旧备份 (保留2个最新) ---"
           FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧备份清理完毕。"; else echo "无需清理，备份数量小于或等于2。"; fi
+          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的主备份清理完毕。"; else echo "无需清理，主备份数量小于或等于2。"; fi
 
-      - name: 14. 清理运行器残留文件
+      - name: 15. [新增] ⚡️ 创建版本化备份至 B2-2 (副)
+        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
+        run: |
+          echo "--- 1. 使用 zstd-19 创建副备份并上传至 B2-2 ---"
+          # 使用新的远程配置、密钥和桶
+          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX_2 }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
+          EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          echo "✅ 新的副备份上传成功。"
+          echo "--- 2. 清理 B2-2 上的旧备份 (保留2个最新) ---"
+          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_secondary_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
+          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的副备份清理完毕。"; else echo "无需清理，副备份数量小于或等于2。"; fi
+
+      - name: 16. 清理运行器残留文件
         if: always()
         run: |
           echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }}; rm -rf chatgpt-on-wechat
