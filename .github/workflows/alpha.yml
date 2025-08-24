@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v9.2 - Fixed Host ADB Dependency)
+name: CI with Persistent Environment (v9.3 - B2 Cost & Stability Fix)
 
 on:
   workflow_dispatch:
@@ -48,7 +48,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v9.2 - Fixed Host ADB Dependency)"
+    name: "Run All Services (v9.3 - B2 Cost & Stability Fix)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -57,17 +57,12 @@ jobs:
       - name: 2. 最大化运行器磁盘空间
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
-      - name: 3. 安装基础系统依赖 (修正)
+      - name: 3. 安装基础系统依赖
         run: |
           sudo apt-get update
-          # [修正] 在安装其他依赖的同时，为 Host 运行器安装 adb
           sudo apt-get install -y debootstrap rclone pigz zstd jq adb
-          
-          # 使用 Docker 官方的便利脚本来安装 Docker
-          echo "--- Installing Docker using official get.docker.com script ---"
           curl -fsSL https://get.docker.com -o get-docker.sh
           sudo sh get-docker.sh
-          echo "--- Docker installation complete ---"
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
@@ -83,31 +78,37 @@ jobs:
           path: ./chatgpt-on-wechat/lib
           key: ${{ runner.os }}-pip-deps-${{ hashFiles('./chatgpt-on-wechat/requirements.txt', './chatgpt-on-wechat/requirements-optional.txt') }}
 
-      - name: 7. ⚡️ 并行准备 (安卓容器在前台)
+      - name: 7. ⚡️ 并行准备并验证
         id: prepare_all
         run: |
           CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp)
-          ( set -eo pipefail; echo "--- [后台A] 开始准备 Chroot..."; sudo mkdir -p ${{ env.CHROOT_DIR }}; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; LATEST_BACKUP=$(rclone lsjson ${B1_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name'); if [[ -n "$LATEST_BACKUP" && "$LATEST_BACKUP" != "null" ]]; then echo " -> [后台A] 发现备份，正在恢复..."; rclone copyto "${B1_FULL_PATH}/${LATEST_BACKUP}" /tmp/b1.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b1.tar.zst | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; rm /tmp/b1.tar.zst; echo "restored=true" > /tmp/chroot_status; else echo " -> [后台A] 备份未找到，全新创建..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [后台A] ✅ Chroot 就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
+          # [后台A] 准备 Chroot 控制容器
+          ( set -eo pipefail; echo "--- [后台A] 开始准备 Chroot..."; sudo mkdir -p ${{ env.CHROOT_DIR }}; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; LATEST_BACKUP=$(rclone lsjson ${B1_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name'); if [[ -n "$LATEST_BACKUP" && "$LATEST_BACKUP" != "null" ]]; then echo " -> [后台A] 发现备份，正在恢复..."; rclone copyto "${B1_FULL_PATH}/${LATEST_BACKUP}" /tmp/b1.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b1.tar.zst | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; rm /tmp/b1.tar.zst; echo "restored=true" > /tmp/chroot_status; else echo " -> [后台A] 备份未找到，全新创建..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [后台A] ✅ Chroot 就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
           CHROOT_PID=$!
+          # [后台B] 安装 Node.js
           ( set -eo pipefail; echo "--- [后台B] 开始安装 Node.js..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [后台B] ✅ Node.js 就绪 ---"; ) > ${NODE_LOG} 2>&1 &
           NODE_PID=$!
+          # [前台] 准备 Android 容器
           set -ex
-          echo "--- [前台] 开始准备 Android (Redroid) 数据目录... ---"
+          echo "--- [前台] 准备 Android (Redroid) 数据目录... ---"
           sudo mkdir -p ${{ env.REDROID_DATA_DIR }}
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
+          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
           B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
           LATEST_ANDROID_BACKUP=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX_2 }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name')
-          if [[ -n "$LATEST_ANDROID_BACKUP" && "$LATEST_ANDROID_BACKUP" != "null" ]]; then echo " -> [前台] 发现安卓数据备份: ${LATEST_ANDROID_BACKUP}. 正在恢复..."; rclone copyto "${B2_FULL_PATH}/${LATEST_ANDROID_BACKUP}" /tmp/b2.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b2.tar.zst | sudo tar -xpf - -C ${{ env.REDROID_DATA_DIR }}; rm /tmp/b2.tar.zst; echo " -> [前台] 安卓数据恢复完成。"; else echo " -> [前台] 未找到安卓数据备份，将启动全新容器。"; fi
-          echo "--- [前台] 拉取最新的 Redroid Docker 镜像... ---"
+          if [[ -n "$LATEST_ANDROID_BACKUP" && "$LATEST_ANDROID_BACKUP" != "null" ]]; then echo " -> [前台] 发现安卓备份: ${LATEST_ANDROID_BACKUP}. 正在恢复..."; rclone copyto "${B2_FULL_PATH}/${LATEST_ANDROID_BACKUP}" /tmp/b2.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b2.tar.zst | sudo tar -xpf - -C ${{ env.REDROID_DATA_DIR }}; rm /tmp/b2.tar.zst; else echo " -> [前台] 未找到安卓备份。"; fi
+          echo "--- [前台] 拉取 Redroid 镜像并启动... ---"
           sudo docker pull redroid/redroid:11.0.0-latest
-          echo "--- [前台] 启动 Redroid Docker 容器... ---"
           sudo docker run -d --privileged --name redroid11 -v ${{ env.REDROID_DATA_DIR }}:/data -p 5555:5555 redroid/redroid:11.0.0-latest
-          echo "--- [前台] ✅ Android (Redroid) 容器已启动 ---"
           set +ex
-          echo "⏳ 等待后台任务完成..."; FAIL=0
-          wait ${CHROOT_PID}; if [[ $? -ne 0 ]]; then FAIL=1; fi; echo "--- 📜 Chroot 日志 ---"; cat ${CHROOT_LOG}
-          wait ${NODE_PID}; if [[ $? -ne 0 ]]; then FAIL=1; fi; echo "--- 📜 Node.js 日志 ---"; cat ${NODE_LOG}
-          if [[ $FAIL -eq 1 ]]; then exit 1; fi; echo "✅ 所有准备任务成功完成!"
+          # [修正] 等待并进行显式验证
+          echo "⏳ 等待所有后台任务完成..."; wait ${CHROOT_PID}; wait ${NODE_PID}
+          echo "--- 📜 Chroot 日志 ---"; cat ${CHROOT_LOG}; echo "--- 📜 Node.js 日志 ---"; cat ${NODE_LOG}
+          echo "--- 最终验证 ---"
+          if ! command -v pm2 &> /dev/null || ! sudo docker --version &> /dev/null; then
+             echo "::error::验证失败: PM2 或 Docker 未能成功安装！"
+             exit 1
+          fi
+          echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
       
       - name: 8. 安装依赖并启动 Python 应用
@@ -178,7 +179,7 @@ jobs:
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true')
         run: |
           echo "--- 停止服务并创建 Chroot 备份 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'pm2 stop all' || true; pm2 stop python-app || true
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
+          rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
           EXCLUDE_OPTS="--exclude=./tmp --exclude=./var/tmp --exclude=./root/.cache --exclude=./var/cache --exclude=./var/log"
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B1_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
@@ -188,7 +189,7 @@ jobs:
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_secondary == 'true')
         run: |
           echo "--- 创建 Android (Redroid) 数据备份 ---"
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
+          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX_2 }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
           sudo tar -c -f - -C ${{ env.REDROID_DATA_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ Android 数据备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B2_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX_2 }}*"
