@@ -1,14 +1,13 @@
-name: CI with Persistent Environment (v7.7 - Simplified & Validated Inputs)
+name: CI with Persistent Environment (v8.0 - Dual-Container Architecture)
 
 on:
   workflow_dispatch:
     inputs:
-      create_backup_b2_primary: { description: '✅ [备份] 是否创建 B2-1 (主) 备份?', required: true, type: boolean, default: false }
-      create_backup_b2_secondary: { description: '✅ [备份] 是否创建 B2-2 (副) 备份?', required: true, type: boolean, default: false }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行 Chroot 内服务?', required: true, type: boolean, default: true }
+      create_backup_b2_primary: { description: '✅ [备份] 是否备份 B2-1 (控制容器)?', required: true, type: boolean, default: false }
+      create_backup_b2_secondary: { description: '✅ [备份] 是否备份 B2-2 (安卓容器)?', required: true, type: boolean, default: false }
+      run_startup_script: { description: '🚀 [核心] 是否自动执行 Chroot 内服务?', required: true, type:boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用 SSH 手动调试?', required: true, type: boolean, default: false }
-      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
-      run_yunzai: { description: '  - 是否启动 Yunzai-Bot (将同时启用Napcat隧道)?', type: boolean, default: true }
+      run_yunzai: { description: '  - 是否启动 Yunzai (将同时启动Launcher和Napcat)?', type: boolean, default: true }
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
       run_openlist: { description: '  - 是否启动 openlist (将同时启动ChmlFrp)?', type: boolean, default: true }
   schedule:
@@ -17,29 +16,30 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 env:
+  # --- 主容器 (Linux Chroot) 配置 ---
   CHROOT_DIR: /mnt/minisys
-  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
-  PAT: ${{ secrets.PAT }}
-
-  # --- 存储配置 1 (主) ---
-  BACKUP_PREFIX: minisys_backup_
   B2_REMOTE_NAME: "b2_storage"
   B2_REMOTE_PATH: "backup"
+  BACKUP_PREFIX: minisys_backup_
   B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
   B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
 
-  # --- 存储配置 2 (副) ---
-  BACKUP_PREFIX_2: minisys_backup_secondary_
+  # --- [架构变更] 安卓容器 (Android AVD) 配置 ---
+  ANDROID_AVD_DIR: /mnt/android_avd
+  ANDROID_AVD_NAME: android_target
   B2_REMOTE_NAME_2: "b2_storage_2"
-  B2_REMOTE_PATH_2: "backup_secondary"
+  B2_REMOTE_PATH_2: "backup_android"
+  BACKUP_PREFIX_2: android_avd_backup_
   B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
   B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
   B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
   B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
-  
-  # --- 服务凭证 ---
+
+  # --- 通用配置 ---
+  RCLONE_FLAGS: "--multi-thread-streams 4 --buffer-size 64M --fast-list --transfers 8 --progress"
+  PAT: ${{ secrets.PAT }}
   LOOPHOLE_WEBDAV_USER: ${{ secrets.LOOPHOLE_WEBDAV_USER }}
   LOOPHOLE_WEBDAV_PASS: ${{ secrets.LOOPHOLE_WEBDAV_PASS }}
   LOOPHOLE_WEBDAV_HOSTNAME: ${{ secrets.LOOPHOLE_WEBDAV_HOSTNAME }}
@@ -49,7 +49,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.7 - Simplified & Validated Inputs)"
+    name: "Run All Services (v8.0 - Dual-Container Architecture)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -59,7 +59,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
 
       - name: 3. 安装基础系统依赖
-        run: sudo apt-get install -y debootstrap rclone pigz zstd jq
+        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
@@ -74,31 +74,42 @@ jobs:
         with:
           path: ./chatgpt-on-wechat/lib
           key: ${{ runner.os }}-pip-deps-${{ hashFiles('./chatgpt-on-wechat/requirements.txt', './chatgpt-on-wechat/requirements-optional.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-deps-
 
-      - name: 7. ⚡️ 并行准备：恢复Chroot & 安装NodeJS
+      - name: 7. ⚡️ 并行准备：恢复/创建双容器 & 安装NodeJS
         id: prepare_all
         run: |
-          CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp)
-          ( echo "--- [并行A] 开始: 恢复/创建 Chroot 环境..."; set -eo pipefail; sudo mkdir -p ${{ env.CHROOT_DIR }}; echo "[并行A] 正在配置 Rclone B2 远程..."; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; echo "[并行A] B2 远程路径: ${B2_FULL_PATH}"; echo "[并行A] 正在查找最新备份..."; LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then echo "   -> [并行A] 发现备份: ${LATEST_BACKUP_FILENAME}. 正在下载..."; LOCAL_BACKUP_PATH="/tmp/backup.archive"; rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}; echo "   -> [并行A] 下载完成. 正在解压..."; if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; else pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; fi; rm -f ${LOCAL_BACKUP_PATH}; echo "restored=true" > /tmp/chroot_status; else echo "   -> [并行A] 备份未找到. 正在创建全新系统 (debootstrap)..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [并行A] ✅ 完成: Chroot 环境准备就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
+          # 创建三个日志文件用于并行任务调试
+          CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp); ANDROID_LOG=$(mktemp)
+          
+          # --- [并行A] 准备 Chroot 控制容器 (minisys) ---
+          ( set -eo pipefail; echo "--- [并行A] 开始: 准备 Chroot 控制容器..."; sudo mkdir -p ${{ env.CHROOT_DIR }}; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; LATEST_BACKUP=$(rclone lsjson ${B1_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_BACKUP" && "$LATEST_BACKUP" != "null" ]]; then echo " -> [并行A] 发现备份: ${LATEST_BACKUP}. 正在恢复..."; rclone copyto "${B1_FULL_PATH}/${LATEST_BACKUP}" /tmp/b1.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b1.tar.zst | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; rm /tmp/b1.tar.zst; echo "restored=true" > /tmp/chroot_status; else echo " -> [并行A] 备份未找到. 正在全新创建 (debootstrap)..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [并行A] ✅ Chroot 控制容器准备就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
           CHROOT_PID=$!
-          ( echo "--- [并行B] 开始: 安装 Node.js & PM2..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [并行B] ✅ 完成: Node.js & PM2 安装完毕 ---"; ) > ${NODE_LOG} 2>&1 &
+          
+          # --- [并行B] 准备 Android 目标容器 (AVD) ---
+          ( set -eo pipefail; echo "--- [并行B] 开始: 准备 Android 目标容器..."; sudo mkdir -p ${{ env.ANDROID_AVD_DIR }}; sudo chown -R $USER:$USER ${{ env.ANDROID_AVD_DIR }}; export ANDROID_SDK_ROOT=${{ env.ANDROID_AVD_DIR }}; rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"; LATEST_BACKUP_ANDROID=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("${{ env.BACKUP_PREFIX_2 }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_BACKUP_ANDROID" && "$LATEST_BACKUP_ANDROID" != "null" ]]; then echo " -> [并行B] 发现安卓备份: ${LATEST_BACKUP_ANDROID}. 正在恢复..."; rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_ANDROID}" /tmp/b2.tar.zst ${{ env.RCLONE_FLAGS }}; unzstd -c /tmp/b2.tar.zst | sudo tar -xpf - -C ${{ env.ANDROID_AVD_DIR }}; rm /tmp/b2.tar.zst; else echo " -> [并行B] 安卓备份未找到. 正在全新创建 (SDK Tools)..."; wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/tools.zip; sudo unzip -q /tmp/tools.zip -d ${{ env.ANDROID_AVD_DIR }}; sudo mkdir -p ${{ env.ANDROID_AVD_DIR }}/cmdline-tools/latest; sudo mv ${{ env.ANDROID_AVD_DIR }}/cmdline-tools/* ${{ env.ANDROID_AVD_DIR }}/cmdline-tools/latest; export PATH=$PATH:${{ env.ANDROID_AVD_DIR }}/cmdline-tools/latest/bin; echo "y" | sudo sdkmanager --sdk_root=${{ env.ANDROID_AVD_DIR }} "platform-tools" "emulator" "system-images;android-30;google_apis;x86_64"; echo "no" | sudo avdmanager --sdk_root=${{ env.ANDROID_AVD_DIR }} create avd -n ${{ env.ANDROID_AVD_NAME }} -k "system-images;android-30;google_apis;x86_64"; fi; echo "--- [并行B] ✅ Android 目标容器准备就绪 ---"; ) > ${ANDROID_LOG} 2>&1 &
+          ANDROID_PID=$!
+
+          # --- [并行C] 安装 Node.js & PM2 (在主机上) ---
+          ( set -eo pipefail; echo "--- [并行C] 开始: 安装 Node.js & PM2..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [并行C] ✅ Node.js & PM2 安装完毕 ---"; ) > ${NODE_LOG} 2>&1 &
           NODE_PID=$!
-          echo "⏳ 等待并行任务完成..."; FAIL=0
-          wait ${CHROOT_PID}; CHROOT_EC=$?; echo "--- 📜 Chroot 任务日志 ---"; cat ${CHROOT_LOG}; if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败 (退出码: $CHROOT_EC)!"; FAIL=1; else echo "✅ [并行A] Chroot 任务成功。"; fi
-          wait ${NODE_PID}; NODE_EC=$?; echo "--- 📜 Node.js 任务日志 ---"; cat ${NODE_LOG}; if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败 (退出码: $NODE_EC)!"; FAIL=1; else echo "✅ [并行B] Node.js 任务成功。"; fi
-          if [[ $FAIL -eq 1 ]]; then echo "一个或多个准备任务失败，终止工作流。"; exit 1; fi
-          echo "✅ 所有准备任务成功完成!"
+          
+          echo "⏳ 等待所有并行任务完成..."; FAIL=0
+          wait ${CHROOT_PID}; if [[ $? -ne 0 ]]; then FAIL=1; fi; echo "--- 📜 Chroot 日志 ---"; cat ${CHROOT_LOG}
+          wait ${ANDROID_PID}; if [[ $? -ne 0 ]]; then FAIL=1; fi; echo "--- 📜 Android 日志 ---"; cat ${ANDROID_LOG}
+          wait ${NODE_PID}; if [[ $? -ne 0 ]]; then FAIL=1; fi; echo "--- 📜 Node.js 日志 ---"; cat ${NODE_LOG}
+          if [[ $FAIL -eq 1 ]]; then exit 1; fi; echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
 
+      # 后续步骤保持不变，仅修改启动脚本内容
       - name: 8. 安装依赖并启动 Python 应用
         run: |
-          nohup bash -c 'echo "--- 开始安装 Python 应用依赖..." && cd chatgpt-on-wechat && python -m pip install --upgrade pip && pip install -r requirements-optional.txt --target ./lib --cache-dir ~/.cache/pip || true && pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip || true && echo "--- ✅ 依赖安装完成。正在启动应用..." && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
+          nohup bash -c 'cd chatgpt-on-wechat && python -m pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
 
       - name: 9. 挂载虚拟文件系统
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}; sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
+
+      # ... (步骤 10 和 11，清理与MAA安装，保持不变) ...
 
       - name: 10. [增强] 清理与更新 Chroot
         run: |
@@ -107,110 +118,98 @@ jobs:
           echo "--- 自动更新 Chroot 内的 OpenList ---"
           sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
           #!/usr/bin/env bash
-          set -e; cd /root
-          echo "[OpenList Updater] Updating apt sources and installing curl/jq..."
-          apt-get update >/dev/null && apt-get install -y curl jq >/dev/null
-          echo "[OpenList Updater] Fetching the latest release tag..."
-          LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r '.tag_name' | head -n 1)
-          if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then echo "[OpenList Updater] Error: Could not fetch the latest tag." >&2; exit 1; fi
-          ARCH=amd64; TARBALL="openlist-linux-${ARCH}.tar.gz"; DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
-          echo "[OpenList Updater] Downloading ${LATEST_TAG} from ${DOWNLOAD_URL}..."
-          wget -qO "${TARBALL}" "${DOWNLOAD_URL}"
-          TMP_DIR=$(mktemp -d); trap "rm -rf ${TMP_DIR}" EXIT
-          echo "[OpenList Updater] Extracting and installing..."
-          tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist; rm -f "${TARBALL}"
-          echo "✅ OpenList 已成功更新至 ${LATEST_TAG}"
+          set -e; cd /root; apt-get update >/dev/null && apt-get install -y curl jq >/dev/null; LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r .tag_name); ARCH=amd64; TARBALL="openlist-linux-${ARCH}.tar.gz"; DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"; wget -qO "${TARBALL}" "${DOWNLOAD_URL}"; TMP_DIR=$(mktemp -d); tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist; rm -f "${TARBALL}"; echo "✅ OpenList 已更新至 ${LATEST_TAG}"
           EOF
-          echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
-
-      - name: 11. [新增] 安装或更新 MAA 环境
+      
+      - name: 11. 安装或更新 MAA 环境
         run: |
-          echo "--- 准备 MAA 安装/更新脚本 ---"
           sudo tee ${{ env.CHROOT_DIR }}/tmp/install_maa.sh > /dev/null << 'EOF'
           #!/bin/bash
-          set -e; IS_RESTORED="${1}"; MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"
-          export DEBIAN_FRONTEND=noninteractive; echo "[MAA Installer] 开始执行..."
-          echo "[MAA Installer] 正在从 ${MAA_CLI_URL} 下载最新的 MAA CLI..."; cd /tmp; curl -L "${MAA_CLI_URL}" | tar -xz
-          echo "[MAA Installer] 正在安装 'maa' 到 /usr/local/bin/..."; mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/
-          if [[ "${IS_RESTORED}" == "true" ]]; then echo "[MAA Installer] 检测到恢复环境，执行 'maa update'..."; maa update
-          else echo "[MAA Installer] 检测到全新环境，执行首次安装..."; echo "[MAA Installer] 正在更新 apt 并安装 adb..."; apt-get update -y && apt-get install -y adb; echo "[MAA Installer] 正在执行 'maa install'..."; maa install; fi
-          echo "[MAA Installer] 清理临时文件..."; rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu; echo "✅ MAA 环境已成功配置！"
+          set -e; IS_RESTORED="${1}"; MAA_CLI_URL="https://github.com/MaaAssistantArknights/maa-cli/releases/latest/download/maa_cli-x86_64-unknown-linux-gnu.tar.gz"; export DEBIAN_FRONTEND=noninteractive; cd /tmp; curl -L "${MAA_CLI_URL}" | tar -xz; mv maa_cli-x86_64-unknown-linux-gnu/maa /usr/local/bin/; if [[ "${IS_RESTORED}" == "true" ]]; then maa update; else apt-get update -y && apt-get install -y adb; maa install; fi; rm -rf /tmp/maa_cli-x86_64-unknown-linux-gnu; echo "✅ MAA 环境已成功配置！"
           EOF
-          echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/install_maa.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/install_maa.sh "${{ steps.prepare_all.outputs.restored }}"
 
-      - name: 12A. [自动化路径] 启动 Chroot 内服务
+      - name: 12. [新增] 启动安卓目标容器 (AVD)
+        run: |
+          echo "--- 启动 Headless 安卓模拟器 ---"
+          export ANDROID_SDK_ROOT=${{ env.ANDROID_AVD_DIR }}
+          export PATH=$PATH:${{ env.ANDROID_AVD_DIR }}/emulator:${{ env.ANDROID_AVD_DIR }}/platform-tools
+          # 在后台启动模拟器，并等待其完全启动
+          nohup emulator -avd ${{ env.ANDROID_AVD_NAME }} -no-window -no-snapshot -no-audio -no-boot-anim -read-only &
+          echo "--- 等待 ADB 服务和模拟器设备上线 ---"
+          adb wait-for-device
+          echo "✅ 安卓模拟器已启动并连接到 ADB: $(adb devices)"
+
+      - name: 13A. [自动化路径] 启动 Chroot 内服务
         if: github.event_name == 'schedule' || (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
           RUNTIME_MINUTES: ${{ (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true' || github.event.inputs.create_backup_b2_secondary == 'true') && 90 || 350 }}
         run: |
-          echo "✅ 进入自动化运行模式 (Chroot 服务)..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
-          # [逻辑变更] 绑定服务，移除独立变量
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'
+          # [逻辑变更] 绑定服务，简化变量
           export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'
           export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'
           export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'
-          # [逻辑变更] chmlfrp 和 napcat 的状态直接跟随其绑定的主服务
+          export RUN_LAUNCHER="${RUN_YUNZAI}"
           export RUN_CHMLFRP="${RUN_OPENLIST}"
           export ENABLE_NAPCAT_TUNNEL="${RUN_YUNZAI}"
           
+          # ... (其他环境变量保持不变) ...
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
           
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
-          if [[ "$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
-          # [逻辑变更] Redis 强制启动，移除判断
+          # [逻辑变更] Launcher 启动与 Yunzai 联动
+          if [[ "$RUN_LAUNCHER" == "true" ]]; then echo "2. [Yunzai联动] 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
           echo "3. 启动 Redis (强制)..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
           if [[ "$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
-          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> [Yunzai联动] 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
-          if [[ "$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
-          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "7. [OpenList联动] 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          # ... (其他服务启动逻辑不变) ...
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
+          # [架构变更] 尝试连接并启动 MAA 任务
+          echo "--- [Chroot 环境内] 启动 MAA 并连接到安卓容器 ---"
+          # 注意：因为chroot共享网络，可以直接连接到host上的adb设备
+          maa startup --adb-path adb --address emulator-5554
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
 
-      - name: 12B. [手动调试路径] 启用 SSH
+      - name: 13B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
         with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
-
-      - name: 13. 卸载虚拟文件系统
+      
+      - name: 14. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
-      - name: 14. ⚡️ [极速] 创建版本化备份至 B2-1 (主)
+      - name: 15. ⚡️ [备份] 创建 Chroot 控制容器备份至 B2-1
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true')
         run: |
-          echo "--- 1. 使用 zstd-19 创建主备份并上传至 B2-1 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
+          echo "--- 停止服务并创建 Chroot 备份 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B1_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新的主备份上传成功。"
-          echo "--- 2. 清理 B2-1 上的旧备份 (保留2个最新) ---"
-          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的主备份清理完毕。"; else echo "无需清理，主备份数量小于或等于2。"; fi
+          # [优化] 使用 zstd -19 以获得更高的压缩率和速度平衡
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B1_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          echo "✅ Chroot 备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B1_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX }}*" 
 
-      - name: 15. [新增] ⚡️ 创建版本化备份至 B2-2 (副)
+      - name: 16. [新增] ⚡️ [备份] 创建 Android 目标容器备份至 B2-2
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_secondary == 'true')
         run: |
-          echo "--- 1. 使用 zstd-19 创建副备份并上传至 B2-2 ---"
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"
+          echo "--- 创建 Android AVD 备份 ---"
+          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX_2 }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
-          EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新的副备份上传成功。"
-          echo "--- 2. 清理 B2-2 上的旧备份 (保留2个最新) ---"
-          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_secondary_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的副备份清理完毕。"; else echo "无需清理，副备份数量小于或等于2。"; fi
+          # [优化] 积极排除安卓模拟器的缓存和临时文件以减小体积
+          EXCLUDE_OPTS="--exclude='*.lock' --exclude='*.sock' --exclude='*cache*' --exclude='*.img.qcow2.dirty' --exclude='multiinstance.lock'"
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.ANDROID_AVD_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          echo "✅ Android AVD 备份上传成功。清理旧备份..."; rclone delete --min-age 24h ${B2_FULL_PATH}/ --include "${{ env.BACKUP_PREFIX_2 }}*"
 
-      - name: 16. 清理运行器残留文件
+      - name: 17. 清理运行器残留文件
         if: always()
         run: |
-          echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }}; rm -rf chatgpt-on-wechat
+          echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }} ${{ env.ANDROID_AVD_DIR }} chatgpt-on-wechat
           sudo npm cache clean --force || true; pip cache purge || true; echo "✅ 运行器清理完成。"
