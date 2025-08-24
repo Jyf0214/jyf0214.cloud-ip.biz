@@ -1,20 +1,16 @@
-name: CI with Persistent Environment (v7.6 - Separated Backup Controls)
+name: CI with Persistent Environment (v7.7 - Simplified & Validated Inputs)
 
 on:
   workflow_dispatch:
     inputs:
-      # [核心变更] 将单个备份选项拆分为两个独立的选项
-      create_backup_b2_primary: { description: '✅ [备份] 是否在结束时创建 B2-1 (主) 备份?', required: true, type: boolean, default: false }
-      create_backup_b2_secondary: { description: '✅ [备份] 是否在结束时创建 B2-2 (副) 备份?', required: true, type: boolean, default: false }
-      run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
-      enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
+      create_backup_b2_primary: { description: '✅ [备份] 是否创建 B2-1 (主) 备份?', required: true, type: boolean, default: false }
+      create_backup_b2_secondary: { description: '✅ [备份] 是否创建 B2-2 (副) 备份?', required: true, type: boolean, default: false }
+      run_startup_script: { description: '🚀 [核心] 是否自动执行 Chroot 内服务?', required: true, type: boolean, default: true }
+      enable_ssh: { description: '🐞 [调试] 是否启用 SSH 手动调试?', required: true, type: boolean, default: false }
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
-      run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
-      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
+      run_yunzai: { description: '  - 是否启动 Yunzai-Bot (将同时启用Napcat隧道)?', type: boolean, default: true }
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
-      enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
-      run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
-      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
+      run_openlist: { description: '  - 是否启动 openlist (将同时启动ChmlFrp)?', type: boolean, default: true }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
@@ -53,7 +49,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.6 - Separated Backup Controls)"
+    name: "Run All Services (v7.7 - Simplified & Validated Inputs)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -147,23 +143,32 @@ jobs:
       - name: 12A. [自动化路径] 启动 Chroot 内服务
         if: github.event_name == 'schedule' || (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
         env:
-          # [核心变更] 根据任一备份选项是否开启来决定运行时长
           RUNTIME_MINUTES: ${{ (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true' || github.event.inputs.create_backup_b2_secondary == 'true') && 90 || 350 }}
         run: |
           echo "✅ 进入自动化运行模式 (Chroot 服务)..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'; export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'; export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
+          # [逻辑变更] 绑定服务，移除独立变量
+          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'
+          export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'
+          # [逻辑变更] chmlfrp 和 napcat 的状态直接跟随其绑定的主服务
+          export RUN_CHMLFRP="${RUN_OPENLIST}"
+          export ENABLE_NAPCAT_TUNNEL="${RUN_YUNZAI}"
+          
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
+          
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
           if [[ "$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
-          if [[ "$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
+          # [逻辑变更] Redis 强制启动，移除判断
+          echo "3. 启动 Redis (强制)..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
           if [[ "$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
-          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
+          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> [Yunzai联动] 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
           if [[ "$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
-          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "7. [OpenList联动] 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
@@ -179,7 +184,6 @@ jobs:
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
       - name: 14. ⚡️ [极速] 创建版本化备份至 B2-1 (主)
-        # [核心变更] 使用新的输入 'create_backup_b2_primary'。定时任务(schedule)时总是执行
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_primary == 'true')
         run: |
           echo "--- 1. 使用 zstd-19 创建主备份并上传至 B2-1 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
@@ -193,7 +197,6 @@ jobs:
           if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧的主备份清理完毕。"; else echo "无需清理，主备份数量小于或等于2。"; fi
 
       - name: 15. [新增] ⚡️ 创建版本化备份至 B2-2 (副)
-        # [核心变更] 使用新的输入 'create_backup_b2_secondary'。定时任务(schedule)时总是执行
         if: success() && !cancelled() && (github.event_name == 'schedule' || github.event.inputs.create_backup_b2_secondary == 'true')
         run: |
           echo "--- 1. 使用 zstd-19 创建副备份并上传至 B2-2 ---"
