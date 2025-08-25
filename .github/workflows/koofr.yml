@@ -76,7 +76,7 @@ jobs:
         env:
           ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
           PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
-        run: maa ${{ github.event.inputs.maa_command_2 }}
+        run: maa ${{ github.event.inputs.maa_command_2 }} --verbose
 
       - name: 10. Upload Configs back to B2
         # 任务结束后，将更新后的配置同步回B2，以便下次使用
