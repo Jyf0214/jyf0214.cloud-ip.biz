@@ -1,4 +1,4 @@
-# GitHub Action Workflow to run MAA-CLI (Version 5, log upload removed)
+# GitHub Action Workflow to run MAA-CLI (Version 5, with secrets for log masking)
 name: MAA Runner
 
 on:
@@ -40,6 +40,7 @@ jobs:
       - name: 5. Download MAA Configs from B2
         run: |
           mkdir -p ~/.config/maa
+          # 从B2拉取包含您真实IP和端口的配置文件
           rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
 
       - name: 6. Install MAA Core and Resources
@@ -48,17 +49,16 @@ jobs:
         run: maa install
 
       - name: 7. Run the MAA Task
+        # --- 核心改动：在此处加入 Secrets ---
+        # 将 Secrets 加载到环境变量中，这样 GitHub Actions 的日志系统
+        # 就会自动检测并屏蔽任何与这些 Secrets 匹配的文本输出。
+        env:
+          ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
+          PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
         run: maa ${{ github.event.inputs.maa_command_2 }}
 
-      - name: 8. Upload Configs back to B2
-        # --- 已更正：移除了日志上传，只保留配置同步 ---
+      - name: 8. Upload Configs 
         if: always()
         run: |
           echo "MAA config directory is: ~/.config/maa"
-          echo "Syncing configs back to B2..."
-          # 只同步配置文件，这是稳定且必要的
-          rclone sync ~/.config/maa b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs
-          
-          # 下面的日志同步命令已被移除，以解决文件冲突错误
-          # LOG_DIR_2=$(maa dir log)
-          # rclone sync "$LOG_DIR_2" b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-logs
+          rm -rf ~/.config/maa
