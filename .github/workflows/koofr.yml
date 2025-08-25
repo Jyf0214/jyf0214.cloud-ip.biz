@@ -1,11 +1,11 @@
-# GitHub Action Workflow to run MAA-CLI (Version 5, with secrets for log masking)
+# GitHub Action Workflow (Final, with ADB Key Injection)
 name: MAA Runner
 
 on:
   workflow_dispatch:
     inputs:
       maa_command_2:
-        description: 'The MAA command to run (e.g., "rogue-like Mizuki")'
+        description: 'The MAA command to run (e.g., "roguelike Mizuki")'
         required: true
         default: 'roguelike Mizuki'
 
@@ -15,18 +15,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: 1. Checkout repository
-        uses: actions/checkout@v4
-
-      - name: 2. Install Dependencies (Rust, Rclone)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rustc cargo rclone adb
-
-      - name: 3. Compile MAA-CLI from Source
-        run: |
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          cargo install --git https://github.com/MaaAssistantArknights/maa-cli.git --bin maa --tag stable --locked
+      # ... (前面步骤 1 到 4 保持不变) ...
 
       - name: 4. Configure Rclone for Backblaze B2
         run: |
@@ -38,33 +27,42 @@ jobs:
           download_url = ${{ secrets.B2_DOWNLOAD_URL_2 }}" > ~/.config/rclone/rclone.conf
 
       - name: 5. Download MAA Configs from B2
+        run: |
+          mkdir -p ~/.config/maa
+          rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
+
+      # --- 核心新增步骤：在连接前准备好授权密钥 ---
+      - name: 5a. Restore ADB Keys for Authentication
+        run: |
+          mkdir -p ~/.android
+          echo "${{ secrets.ADB_PRIVATE_KEY_2 }}" > ~/.android/adbkey
+          echo "${{ secrets.ADB_PUBLIC_KEY_2 }}" > ~/.android/adbkey.pub
+          chmod 600 ~/.android/adbkey
+
+      # --- 您原有的连接步骤，现在应该可以成功了 ---
+      - name: 6. Connect to Android Device
         env:
           ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
           PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
         run: |
-          mkdir -p ~/.config/maa
-          # 从B2拉取包含您真实IP和端口的配置文件
-          rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
           adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
-          sleep 5
-          adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
+          sleep 2 # 等待连接稳定，不再需要等待手动授权
+          adb devices
 
-      - name: 6. Install MAA Core and Resources
+      - name: 7. Install MAA Core and Resources
         env:
           B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL_2 }}
         run: maa install
 
-      - name: 7. Run the MAA Task
-        # --- 核心改动：在此处加入 Secrets 
-        # 将 Secrets 加载到环境变量中，这样 GitHub Actions 的日志系统
-        # 就会自动检测并屏蔽任何与这些 Secrets 匹配的文本输出。
+      - name: 8. Run the MAA Task
         env:
           ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
           PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
         run: maa ${{ github.event.inputs.maa_command_2 }}
 
-      - name: 8. Upload Configs 
+      - name: 9. Upload Configs back to B2
         if: always()
         run: |
           echo "MAA config directory is: ~/.config/maa"
-          rm -rf ~/.config/maa
+          echo "Syncing configs back to B2..."
+          rclone sync ~/.config/maa b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs
