@@ -46,6 +46,8 @@ jobs:
           # 从B2拉取包含您真实IP和端口的配置文件
           rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
           adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
+          sleep 5
+          adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
 
       - name: 6. Install MAA Core and Resources
         env:
