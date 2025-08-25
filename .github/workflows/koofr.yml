@@ -21,7 +21,7 @@ jobs:
       - name: 2. Install Dependencies (Rust, Rclone)
         run: |
           sudo apt-get update
-          sudo apt-get install -y rustc cargo rclone
+          sudo apt-get install -y rustc cargo rclone adb
 
       - name: 3. Compile MAA-CLI from Source
         run: |
