@@ -1,11 +1,11 @@
-# GitHub Action Workflow to run MAA-CLI (Version 4 with corrected config path)
+# GitHub Action Workflow to run MAA-CLI (Version 5, log upload removed)
 name: MAA Runner
 
 on:
   workflow_dispatch:
     inputs:
       maa_command_2:
-        description: 'The MAA command to run (e.g., "roguelike Mizuki")'
+        description: 'The MAA command to run (e.g., "rogue-like Mizuki")'
         required: true
         default: 'roguelike Mizuki'
 
@@ -38,7 +38,6 @@ jobs:
           download_url = ${{ secrets.B2_DOWNLOAD_URL_2 }}" > ~/.config/rclone/rclone.conf
 
       - name: 5. Download MAA Configs from B2
-        # --- 已更正路径 ---
         run: |
           mkdir -p ~/.config/maa
           rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
@@ -51,16 +50,15 @@ jobs:
       - name: 7. Run the MAA Task
         run: maa ${{ github.event.inputs.maa_command_2 }}
 
-      - name: 8. Upload Logs and Results back to B2
-        # --- 已更正路径 ---
+      - name: 8. Upload Configs back to B2
+        # --- 已更正：移除了日志上传，只保留配置同步 ---
         if: always()
         run: |
-          LOG_DIR_2=$(maa dir log)
           echo "MAA config directory is: ~/.config/maa"
-          echo "MAA log directory is: $LOG_DIR_2"
-          
           echo "Syncing configs back to B2..."
+          # 只同步配置文件，这是稳定且必要的
           rclone sync ~/.config/maa b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs
           
-          echo "Syncing logs to B2..."
-          rclone sync "$LOG_DIR_2" b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-logs
+          # 下面的日志同步命令已被移除，以解决文件冲突错误
+          # LOG_DIR_2=$(maa dir log)
+          # rclone sync "$LOG_DIR_2" b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-logs
