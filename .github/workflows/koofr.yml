@@ -1,95 +1,72 @@
-# 工作流名称
-name: 'Migration: Sync WebDAV to B2'
+# GitHub Action Workflow to run MAA-CLI (Version 3 with namespaced variables)
+name: MAA Runner
 
-# 工作流触发器
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: '🧪 是否启用演练模式 (Dry Run)? (只会显示将要传输的文件，不会实际操作)'
+      # 输入参数也已更新
+      maa_command_2:
+        description: 'The MAA command to run (e.g., "roguelike Mizuki")'
         required: true
-        type: boolean
-        default: true
-
-# 全局环境变量
-env:
-  # Rclone 远程的内部名称 (可自定义)
-  WEBDAV_REMOTE_NAME: "webdav_source"
-  B2_REMOTE_NAME: "b2_destination"
-
-  # 备份文件所在的目录 (假设两边都叫 'backup')
-  REMOTE_PATH: "backup"
-
-  # WebDAV Secrets
-  WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-  WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-  WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-
-  # B2 Secrets
-  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
-  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-  
-  # Rclone 通用传输参数
-  RCLONE_FLAGS: "--multi-thread-streams 8 --buffer-size 64M --fast-list --transfers 16 --progress"
+        default: 'roguelike Mizuki'
 
 jobs:
-  migrate-data:
-    name: "Sync Data from WebDAV to B2"
+  run-maa:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 60
+
     steps:
-      - name: 1. 安装 Rclone
-        run: sudo apt-get update && sudo apt-get install -y rclone
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 2. 配置 Rclone Remotes (WebDAV 和 B2)
+      - name: 2. Install Dependencies (Rust, Rclone)
         run: |
-          echo "--- 开始配置 Rclone ---"
-          
-          # 配置 WebDAV 源
-          echo "1. 配置 WebDAV 源: ${{ env.WEBDAV_REMOTE_NAME }}"
-          rclone config create ${{ env.WEBDAV_REMOTE_NAME }} webdav \
-            url "${{ env.WEBDAV_URL }}" \
-            vendor "other" \
-            user "${{ env.WEBDAV_USER }}" \
-            pass "${{ env.WEBDAV_PASS }}"
+          sudo apt-get update
+          sudo apt-get install -y rustc cargo rclone
 
-          # 配置 B2 目标
-          echo "2. 配置 B2 目标: ${{ env.B2_REMOTE_NAME }}"
-          rclone config create ${{ env.B2_REMOTE_NAME }} b2 \
-            account "${{ env.B2_KEY_ID }}" \
-            key "${{ env.B2_APPLICATION_KEY }}"
-
-          echo "✅ Rclone 配置完成。已设置两个远程。"
-          rclone listremotes
-
-      - name: 3. 执行数据同步
+      - name: 3. Compile MAA-CLI from Source
         run: |
-          SOURCE="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.REMOTE_PATH }}"
-          DESTINATION="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.REMOTE_PATH }}"
-          
-          echo "同步源: ${SOURCE}"
-          echo "同步目标: ${DESTINATION}"
-          
-          # 根据输入参数决定是否为演练模式
-          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
-            echo "--- 🧪 演练模式 (DRY RUN) ---"
-            echo "以下文件将会被同步，但不会执行实际操作："
-            rclone sync "${SOURCE}" "${DESTINATION}" --dry-run ${{ env.RCLONE_FLAGS }}
-          else
-            echo "--- 🚀 实时同步模式 (LIVE RUN) ---"
-            echo "警告：现在将开始实际的文件传输！"
-            rclone sync "${SOURCE}" "${DESTINATION}" ${{ env.RCLONE_FLAGS }}
-            echo "✅ 同步操作执行完毕。"
-          fi
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          cargo install --git https://github.com/MaaAssistantArknights/maa-cli.git --bin maa --tag stable --locked
 
-      - name: 4. [可选] 验证同步结果
-        if: github.event.inputs.dry_run == 'false' # 仅在真实同步后才验证
+      - name: 4. Configure Rclone for Backblaze B2
         run: |
-          echo "--- 开始验证同步结果 ---"
-          SOURCE="${{ env.WEBDAV_REMOTE_NAME }}:${{ env.REMOTE_PATH }}"
-          DESTINATION="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.REMOTE_PATH }}"
+          mkdir -p ~/.config/rclone
+          # 所有 secrets 变量名已更新
+          echo "[b2]
+          type = b2
+          account = ${{ secrets.B2_KEY_ID_2 }}
+          key = ${{ secrets.B2_APPLICATION_KEY_2 }}
+          download_url = ${{ secrets.B2_DOWNLOAD_URL_2 }}" > ~/.config/rclone/rclone.conf
+
+      - name: 5. Download MAA Configs from B2
+        run: |
+          mkdir -p ~/.config/maa-cli
+          # B2_BUCKET_NAME_2 已更新
+          rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa-cli || true
+
+      - name: 6. Install MAA Core and Resources
+        env:
+          # B2_DOWNLOAD_URL_2 已更新
+          B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL_2 }}
+        run: maa install
+
+      - name: 7. Run the MAA Task
+        # 输入参数变量名已更新
+        run: maa ${{ github.event.inputs.maa_command_2 }}
+
+      - name: 8. Upload Logs and Results back to B2
+        if: always()
+        run: |
+          # 本地变量也已更新
+          LOG_DIR_2=$(maa dir log)
+          echo "MAA config directory is: ~/.config/maa-cli"
+          echo "MAA log directory is: $LOG_DIR_2"
           
-          # rclone check 会比较源和目标的文件，如果一致则成功退出
-          rclone check "${SOURCE}" "${DESTINATION}" --one-way --progress
-          echo "✅ 验证完成，两边文件一致！"
+          echo "Syncing configs back to B2..."
+          # B2_BUCKET_NAME_2 已更新
+          rclone sync ~/.config/maa-cli b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs
+          
+          echo "Syncing logs to B2..."
+          # B2_BUCKET_NAME_2 和本地变量已更新
+          rclone sync "$LOG_DIR_2" b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-logs
