@@ -60,6 +60,7 @@ jobs:
         env:
           ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
           PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
+          ADB_SERVER_TIMEOUT: 60000
         run: |
           adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
           sleep 2 # 等待连接稳定
@@ -76,6 +77,7 @@ jobs:
         env:
           ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
           PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
+          ADB_SERVER_TIMEOUT: 60000
         run: maa ${{ github.event.inputs.maa_command_2 }} --verbose
 
       - name: 10. Upload Configs back to B2
