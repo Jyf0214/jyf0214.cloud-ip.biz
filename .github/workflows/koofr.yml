@@ -38,11 +38,14 @@ jobs:
           download_url = ${{ secrets.B2_DOWNLOAD_URL_2 }}" > ~/.config/rclone/rclone.conf
 
       - name: 5. Download MAA Configs from B2
+        env:
+          ADDRESS_SECRET_2: ${{ secrets.ADDRESS_SECRET_2 }}
+          PORT_SECRET_2: ${{ secrets.PORT_SECRET_2 }}
         run: |
           mkdir -p ~/.config/maa
           # 从B2拉取包含您真实IP和端口的配置文件
           rclone sync b2:${{ secrets.B2_BUCKET_NAME_2 }}/maa-configs ~/.config/maa || true
-          adb connect 
+          adb connect ${{ secrets.ADDRESS_SECRET_2 }}:${{ secrets.PORT_SECRET_2 }}
 
       - name: 6. Install MAA Core and Resources
         env:
@@ -50,7 +53,7 @@ jobs:
         run: maa install
 
       - name: 7. Run the MAA Task
-        # --- 核心改动：在此处加入 Secrets ---
+        # --- 核心改动：在此处加入 Secrets 
         # 将 Secrets 加载到环境变量中，这样 GitHub Actions 的日志系统
         # 就会自动检测并屏蔽任何与这些 Secrets 匹配的文本输出。
         env:
