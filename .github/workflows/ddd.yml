@@ -182,18 +182,44 @@ jobs:
       - name: 12. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
-      - name: 13. ⚡️ [极速] 创建版本化备份 (zstd-19)
+
+      - name: 13. ⚡️ [极致压缩] 创建版本化备份 (zstd-22 --long)
         if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
         run: |
-          echo "--- 1. 使用 zstd-19 创建备份并上传至 B2 ---"; sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true; pm2 stop python-app || true
+          echo "--- 1. 使用 zstd-22 --long 创建备份并上传至 B2 ---"
+          # 停止 chroot 内和外部的所有 pm2 服务
+          sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
+          pm2 stop python-app || true
+
+          # 配置 rclone
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S'); NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+
+          # 生成带时间戳的文件名
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
+          NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
+          B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
+
+          # 定义 tar 排除选项
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -19 -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+
+          # 执行打包、极致压缩和上传
+          # 使用 -22 --long 模式以获得最大压缩比，这会显著增加时间和内存消耗
+          echo "正在执行 Tar 和 Zstandard 极致压缩，这可能需要很长时间..."
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -22 --long -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
           echo "✅ 新备份上传成功。"
+
           echo "--- 2. 清理 B2 上的旧备份 (保留2个最新) ---"
-          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "将要删除以下旧备份:"; echo "$FILES_TO_DELETE"; for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧备份清理完毕。"; else echo "无需清理，备份数量小于或等于2。"; fi
+          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\.tar\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
+          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
+            echo "将要删除以下旧备份:"
+            echo "$FILES_TO_DELETE"
+            for file_name in $FILES_TO_DELETE; do
+              rclone deletefile "${B2_FULL_PATH}/${file_name}"
+            done
+            echo "✅ 旧备份清理完毕。"
+          else
+            echo "无需清理，备份数量小于或等于2。"
+          fi
 
       - name: 14. 清理运行器残留文件
         if: always()
