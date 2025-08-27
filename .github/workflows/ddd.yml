@@ -102,10 +102,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-deps-
 
-      - name: 7. ⚡️ 并行准备：恢复Chroot & 安装NodeJS & 准备Android数据目录
+      - name: 7. ⚡️ 并行准备 (增强日志模式)
         id: prepare_all
         run: |
           CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp); ANDROID_LOG=$(mktemp)
+          # ... (这里省略了启动三个后台任务的代码，与您原来的一样) ...
           ( echo "--- [并行A] 开始: 恢复/创建 Chroot 环境..."; set -eo pipefail; sudo mkdir -p ${{ env.CHROOT_DIR }}; echo "[并行A] 正在配置 Rclone B2 远程..."; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; echo "[并行A] B2 远程路径: ${B2_FULL_PATH}"; echo "[并行A] 正在查找最新备份..."; LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then echo "   -> [并行A] 发现备份: ${LATEST_BACKUP_FILENAME}. 正在下载..."; LOCAL_BACKUP_PATH="/tmp/backup.archive"; rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}; echo "   -> [并行A] 下载完成. 正在解压..."; if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; else pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; fi; rm -f ${LOCAL_BACKUP_PATH}; echo "restored=true" > /tmp/chroot_status; else echo "   -> [并行A] 备份未找到. 正在创建全新系统 (debootstrap)..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [并行A] ✅ 完成: Chroot 环境准备就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
           CHROOT_PID=$!
           ( echo "--- [并行B] 开始: 安装 Node.js & PM2..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [并行B] ✅ 完成: Node.js & PM2 安装完毕 ---"; ) > ${NODE_LOG} 2>&1 &
@@ -113,12 +114,28 @@ jobs:
           ( echo "--- [并行C] 开始: 准备 Android 数据目录 & 恢复备份..."; sudo mkdir -p ${{ env.ANDROID_DATA_DIR }}; echo "[并行C] 配置 Android Rclone B2_2 远程..."; rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"; B2_FULL_PATH_2="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"; LATEST_ANDROID_BACKUP=$(rclone lsjson ${B2_FULL_PATH_2}/ | jq -r '[.[] | select(.Name | test("android_backup_.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_ANDROID_BACKUP" && "$LATEST_ANDROID_BACKUP" != "null" ]]; then echo "   -> [并行C] 发现 Android 备份: ${LATEST_ANDROID_BACKUP}. 下载中..."; LOCAL_ANDROID_BACKUP="/tmp/android_backup.zst"; rclone copyto "${B2_FULL_PATH_2}/${LATEST_ANDROID_BACKUP}" ${LOCAL_ANDROID_BACKUP} ${{ env.RCLONE_FLAGS }}; echo "   -> [并行C] 下载完成. 解压中..."; unzstd -c ${LOCAL_ANDROID_BACKUP} | sudo tar -xpf - -C ${{ env.ANDROID_DATA_DIR }}; rm -f ${LOCAL_ANDROID_BACKUP}; echo "android_restored=true" > /tmp/android_status; else echo "   -> [并行C] 无备份. 创建空目录."; echo "android_restored=false" > /tmp/android_status; fi; echo "--- [并行C] ✅ 完成: Android 数据准备就绪 ---"; ) > ${ANDROID_LOG} 2>&1 &
           ANDROID_PID=$!
 
-          echo "⏳ 等待并行任务完成..."; FAIL=0
-          wait ${CHROOT_PID}; CHROOT_EC=$?; echo "--- 📜 Chroot 任务日志 ---"; cat ${CHROOT_LOG}; if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败 (退出码: $CHROOT_EC)!"; FAIL=1; else echo "✅ [并行A] Chroot 任务成功。"; fi
-          wait ${NODE_PID}; NODE_EC=$?; echo "--- 📜 Node.js 任务日志 ---"; cat ${NODE_LOG}; if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败 (退出码: $NODE_EC)!"; FAIL=1; else echo "✅ [并行B] Node.js 任务成功。"; fi
-          wait ${ANDROID_PID}; ANDROID_EC=$?; echo "--- 📜 Android 准备任务日志 ---"; cat ${ANDROID_LOG}; if [[ $ANDROID_EC -ne 0 ]]; then echo "❌ [并行C] Android 准备任务失败 (退出码: $ANDROID_EC)!"; FAIL=1; else echo "✅ [并行C] Android 准备任务成功。"; fi
+          echo "⏳ 逐个等待并行任务并检查日志..."
+          FAIL=0
 
-          if [[ $FAIL -eq 1 ]]; then echo "一个或多个准备任务失败，终止工作流。"; exit 1; fi
+          wait ${CHROOT_PID}; CHROOT_EC=$?
+          echo "--- 📜 Chroot 任务日志 (退出码: $CHROOT_EC) ---"
+          cat ${CHROOT_LOG}
+          if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败!"; FAIL=1; fi
+
+          wait ${NODE_PID}; NODE_EC=$?
+          echo "--- 📜 Node.js 任务日志 (退出码: $NODE_EC) ---"
+          cat ${NODE_LOG}
+          if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败!"; FAIL=1; fi
+          
+          wait ${ANDROID_PID}; ANDROID_EC=$?
+          echo "--- 📜 Android 准备任务日志 (退出码: $ANDROID_EC) ---"
+          cat ${ANDROID_LOG}
+          if [[ $ANDROID_EC -ne 0 ]]; then echo "❌ [并行C] Android 准备任务失败!"; FAIL=1; fi
+
+          if [[ $FAIL -eq 1 ]]; then
+            echo "一个或多个准备任务失败，终止工作流。"
+            exit 1
+          fi
 
           echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
