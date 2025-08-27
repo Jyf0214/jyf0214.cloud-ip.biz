@@ -6,6 +6,7 @@ on:
       create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: false }
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
+      ssh_timeout_minutes: { description: '⏳ SSH会话超时时间（分钟）', required: false, type: number, default: 350 }
       run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
       run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
       run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
@@ -186,7 +187,7 @@ jobs:
         uses: lhotari/action-upterm@v1
         with:
           limit-access-to-actor: true
-          wait-timeout-minutes: ${{ github.event.inputs.create_backup_on_finish == 'true' && 270 || 350 }}
+          wait-timeout-minutes: ${{ github.event.inputs.ssh_timeout_minutes }}
 
       - name: 12. 卸载虚拟文件系统
         if: always()
