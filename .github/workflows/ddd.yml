@@ -149,14 +149,12 @@ jobs:
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
-      - name: 11A. [自动化路径] 启动 Chroot 内服务
-        if: >
-          github.event_name == 'schedule' || 
-          (github.event.inputs.run_startup_script == 'true' && github.event.inputs.enable_ssh == 'false')
+      - name: 11A. 启动 Chroot 内服务
+        if: github.event_name == 'schedule' || github.event.inputs.run_startup_script == 'true'
         env:
           RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 90 || 350 }}
         run: |
-          echo "✅ 进入自动化运行模式 (Chroot 服务)..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
+          echo "✅ 准备启动 Chroot 内服务..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
           export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'; export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'; export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
@@ -173,12 +171,23 @@ jobs:
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-          echo "🚀 服务已启动。工作流将暂停 ${RUNTIME_MINUTES} 分钟..."; sleep ${RUNTIME_MINUTES}m; echo "⏳ 规定运行时间已到。"
+          
+          echo "🚀 服务已启动。"
+          if [[ "${{ github.event.inputs.enable_ssh }}" == 'false' ]]; then
+            echo "工作流将暂停 ${RUNTIME_MINUTES} 分钟 (SSH未启用)..."
+            sleep ${RUNTIME_MINUTES}m
+            echo "⏳ 规定运行时间已到。"
+          else
+            echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
+          fi
 
       - name: 11B. [手动调试路径] 启用 SSH
         if: github.event.inputs.enable_ssh == 'true'
         uses: lhotari/action-upterm@v1
-        with: { limit-access-to-actor: true, wait-timeout-minutes: 350 }
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: ${{ github.event.inputs.create_backup_on_finish == 'true' && 270 || 350 }}
+
       - name: 12. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
