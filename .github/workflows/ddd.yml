@@ -7,13 +7,10 @@ on:
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       ssh_timeout_minutes: { description: '⏳ SSH会话超时时间（分钟）', required: false, type: number, default: 350 }
-      run_launcher: { description: '  - 是否启动 launcher 服务?', type: boolean, default: false }
-      run_redis: { description: '  - 是否启动 Redis 服务?', type: boolean, default: true }
-      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务?', type: boolean, default: true }
+      run_yunzai: { description: '  - 是否启动 Yunzai-Bot 服务? (包含 launcher)', type: boolean, default: true }
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
       enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
-      run_openlist: { description: '  - 是否启动 openlist 服务?', type: boolean, default: true }
-      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务?', type: boolean, default: true }
+      run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务? (包含 openlist)', type: boolean, default: true }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
@@ -158,17 +155,15 @@ jobs:
           echo "✅ 准备启动 Chroot 内服务..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
-          export RUN_LAUNCHER='${{ github.event.inputs.run_launcher || (github.event_name == 'schedule' && 'true') }}'; export RUN_REDIS='${{ github.event.inputs.run_redis || (github.event_name == 'schedule' && 'true') }}'; export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_OPENLIST='${{ github.event.inputs.run_openlist || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
+          export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
           echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
           echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
-          if [[ "$RUN_LAUNCHER" == "true" ]]; then echo "2. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; else echo "2. [已禁用] 跳过 launcher。"; fi
-          if [[ "$RUN_REDIS" == "true" ]]; then echo "3. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"; else echo "3. [已禁用] 跳过 Redis。"; fi
-          if [[ "$RUN_YUNZAI" == "true" ]]; then echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "4. [已禁用] 跳过 Yunzai-Bot。"; fi
+          echo "2. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
+          if [[ "$RUN_YUNZAI" == "true" ]]; then echo "3. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "3-4. [已禁用] 跳过 launcher 和 Yunzai-Bot。"; fi
           if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
-          if [[ "$RUN_OPENLIST" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; else echo "6. [已禁用] 跳过 openlist。"; fi
-          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "7. 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "7. [已禁用] 跳过 ChmlFrp。"; fi
+          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start ./openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; echo "7. 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "6-7. [已禁用] 跳过 openlist 和 ChmlFrp。"; fi
           echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
