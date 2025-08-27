@@ -69,8 +69,22 @@ jobs:
           sudo docker system prune -a -f || true
           echo "✅ 磁盘空间优化完成。当前可用空间: $(df -h / | tail -1 | awk '{print $4}')"
 
-      - name: 3. 安装基础系统依赖
-        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq docker.io
+      - name: 3. 安装基础系统依赖和 Docker
+        run: |
+          # 步骤 1: 更新包列表并安装除 Docker 外的其他依赖
+          echo "--- 更新 APT 并安装基础依赖 ---"
+          sudo apt-get update
+          sudo apt-get install -y debootstrap rclone pigz zstd jq
+
+          # 步骤 2: 使用 Docker 官方脚本安装 Docker
+          # 这个脚本会自动处理依赖冲突，卸载旧版本，并安装最新的稳定版 Docker Engine
+          echo "--- 使用官方脚本安装 Docker Engine ---"
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          
+          # 步骤 3: 验证 Docker 是否安装成功
+          echo "--- 验证 Docker 安装 ---"
+          sudo docker --version
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
