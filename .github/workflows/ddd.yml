@@ -70,7 +70,7 @@ jobs:
           echo "✅ 磁盘空间优化完成。当前可用空间: $(df -h / | tail -1 | awk '{print $4}')"
 
       - name: 3. 安装基础系统依赖
-        run: sudo apt-get install -y debootstrap rclone pigz zstd jq docker.io
+        run: sudo apt-get update && sudo apt-get install -y debootstrap rclone pigz zstd jq docker.io
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
