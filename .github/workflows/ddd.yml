@@ -205,6 +205,26 @@ jobs:
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
           sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
+
+      - name: 11C. 启动 Android 容器 (独立脚本启动)
+        if: github.event.inputs.run_android_container == 'true' || github.event_name == 'schedule'
+        run: |
+          echo "--- 开始启动 Android 容器 (独立于 Chroot) ---"
+          sudo tee /tmp/start_android.sh > /dev/null << 'EOF'
+          #!/bin/bash
+          set -e
+          export ANDROID_DATA_DIR='${{ env.ANDROID_DATA_DIR }}'
+          echo "1. 启动 Docker 服务..."; sudo systemctl start docker || true
+          echo "2. 拉取 Android 镜像..."; sudo docker pull budtmo/docker-android:emulator_9.0
+          echo "3. 启动 Android 容器..."; sudo docker run -d --privileged --name maa-android-9 -p 5555:5555 -p 6080:6080 -v "${ANDROID_DATA_DIR}:/data" budtmo/docker-android:emulator_9.0
+          echo "✅ Android 容器已启动。暴露端口: 5555 (ADB), 6080 (VNC)。数据存储于 ${ANDROID_DATA_DIR}"
+          EOF
+          sudo chmod +x /tmp/start_android.sh
+          /tmp/start_android.sh
+
+          ANDROID_RUNTIME=${{ github.event.inputs.android_runtime_minutes || 60 }}
+          echo "Android 容器将运行 ${ANDROID_RUNTIME} 分钟..."
+
       - name: 11A. 启动 Chroot 内服务
         if: github.event_name == 'schedule' || github.event.inputs.run_startup_script == 'true'
         env:
@@ -242,27 +262,6 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: ${{ github.event.inputs.ssh_timeout_minutes }}
 
-      - name: 11C. 启动 Android 容器 (独立脚本启动)
-        if: github.event.inputs.run_android_container == 'true' || github.event_name == 'schedule'
-        run: |
-          echo "--- 开始启动 Android 容器 (独立于 Chroot) ---"
-          sudo tee /tmp/start_android.sh > /dev/null << 'EOF'
-          #!/bin/bash
-          set -e
-          export ANDROID_DATA_DIR='${{ env.ANDROID_DATA_DIR }}'
-          echo "1. 启动 Docker 服务..."; sudo systemctl start docker || true
-          echo "2. 拉取 Android 镜像..."; sudo docker pull budtmo/docker-android:emulator_9.0
-          echo "3. 启动 Android 容器..."; sudo docker run -d --privileged --name maa-android-9 -p 5555:5555 -p 6080:6080 -v "${ANDROID_DATA_DIR}:/data" budtmo/docker-android:emulator_9.0
-          echo "✅ Android 容器已启动。暴露端口: 5555 (ADB), 6080 (VNC)。数据存储于 ${ANDROID_DATA_DIR}"
-          EOF
-          sudo chmod +x /tmp/start_android.sh
-          /tmp/start_android.sh
-
-          ANDROID_RUNTIME=${{ github.event.inputs.android_runtime_minutes || 60 }}
-          echo "Android 容器将运行 ${ANDROID_RUNTIME} 分钟..."
-          sleep ${ANDROID_RUNTIME}m
-          echo "⏳ Android 运行时间已到。停止容器..."
-          sudo docker stop maa-android-9 || true
 
       - name: 12. 卸载虚拟文件系统
         if: always()
@@ -275,7 +274,8 @@ jobs:
           # 停止 chroot 内和外部的所有 pm2 服务
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
-
+          echo "⏳ Android 运行时间已到。停止容器..."
+          sudo docker stop maa-android-9 || true
           # 配置 rclone
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
 
