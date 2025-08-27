@@ -246,47 +246,49 @@ jobs:
             echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH (仓库所有者密钥验证)
+      - name: 11B. [手动调试路径] 启用 SSH (强制所有者密钥验证)
         if: github.event.inputs.enable_ssh == 'true'
         run: |
           set -e # 确保任何命令失败都会中止脚本
-          echo "--- 1. 准备 SSH 验证环境 ---"
-          # 从 GitHub API 获取仓库所有者的公钥
+          echo "--- 1. 获取并验证仓库所有者的 SSH 公钥 ---"
+          
+          # 根据您的要求，明确打印出正在为哪个用户操作
+          echo "✅ 正在为 GitHub 用户 [${{ github.repository_owner }}] 配置 SSH 访问权限..."
+          
           OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
-          echo "正在从 ${OWNER_KEYS_URL} 获取公钥..."
+          AUTHORIZED_KEYS_FILE=$(mktemp) # 使用临时文件存储公钥
           
-          # 创建 .ssh 目录并设置正确权限
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          
-          # 使用 curl 和 jq 获取并格式化密钥，然后写入 authorized_keys
-          # 使用 --fail 确保在 HTTP 请求失败时 curl 会返回非零退出码
-          curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > ~/.ssh/authorized_keys
-          
-          # 检查 authorized_keys 文件是否为空，如果为空则说明没有获取到密钥
-          if [ ! -s ~/.ssh/authorized_keys ]; then
-            echo "::error::无法从 GitHub API 获取 ${{ github.repository_owner }} 的公钥，或者该用户没有设置公钥。"
-            echo "请在 https://github.com/settings/keys 确认已添加 SSH 公钥。"
+          # 从 GitHub API 获取公钥并存入临时文件
+          if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > "${AUTHORIZED_KEYS_FILE}"; then
+            echo "::error::从 GitHub API 获取公钥失败。请检查用户 [${{ github.repository_owner }}] 是否存在或网络是否正常。"
             exit 1
           fi
 
-          # 设置 authorized_keys 的正确权限
-          chmod 600 ~/.ssh/authorized_keys
-          echo "✅ 成功将 ${{ github.repository_owner }} 的公钥写入 authorized_keys。"
+          # 检查公钥文件是否为空
+          if [ ! -s "${AUTHORIZED_KEYS_FILE}" ]; then
+            echo "::error::用户 [${{ github.repository_owner }}] 没有设置任何公开的 SSH 密钥。"
+            echo "请访问 https://github.com/settings/keys 添加您的 SSH 公钥后重试。"
+            rm -f "${AUTHORIZED_KEYS_FILE}"
+            exit 1
+          fi
+
+          echo "✅ 成功获取并缓存了用户的 SSH 公钥。"
           
-          echo "--- 2. 安装并配置 tmate ---"
-          sudo apt-get update
-          sudo apt-get install -y tmate
+          echo "--- 2. 安装并配置 tmate 进行安全连接 ---"
+          sudo apt-get update && sudo apt-get install -y tmate
           
-          echo "--- 3. 启动 tmate 会话 ---"
+          echo "--- 3. 启动 tmate 会话并强制执行密钥验证 ---"
           tmate -S /tmp/tmate.sock new-session -d
+          
+          # 这是修复安全问题的关键：强制tmate使用我们下载的公钥文件进行身份验证
+          tmate -S /tmp/tmate.sock set-option tmate-authorized-keys "${AUTHORIZED_KEYS_FILE}"
+          
           tmate -S /tmp/tmate.sock wait tmate-ready
           
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           echo "===================================================================================="
-          echo "✅ SSH 会话已准备就绪。请使用与您 GitHub 账户关联的 SSH 私钥进行连接。"
+          echo "✅ SSH 会话已准备就绪。只有 GitHub 用户 [${{ github.repository_owner }}] 的私钥才能连接。"
           echo "连接命令: $SSH_CMD"
-          echo "注意: 首次连接时，系统可能会提示您确认主机的真实性，请输入 'yes'。"
           echo "===================================================================================="
           echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
           echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时，并强制断开所有连接。"
@@ -311,8 +313,9 @@ jobs:
             sleep 10
           done
           
-          echo "--- 4. 清理 tmate ---"
+          echo "--- 4. 清理 tmate 及临时文件 ---"
           tmate -S /tmp/tmate.sock kill-session || true
+          rm -f "${AUTHORIZED_KEYS_FILE}"
 
       - name: 12. 卸载虚拟文件系统
         if: always()
