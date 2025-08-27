@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v7.5 - AVD Emulator + B2 Backup)
+name: CI with Persistent Environment (v7.6 - Chroot Only Debug Build)
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ on:
         options:
           - 'none'
           - 'chroot'
-          - 'android'
-          - 'all'
+          # - 'android' # 已注释掉 Android 备份选项
+          # - 'all'     # 已注释掉全部备份选项
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       ssh_timeout_minutes: { description: '⏳ SSH会话超时时间（分钟）', required: false, type: number, default: 350 }
@@ -20,8 +20,9 @@ on:
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
       enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务? (包含 openlist)', type: boolean, default: true }
-      run_android_container: { description: '🚀 是否启动 Android 模拟器服务?', required: true, type: boolean, default: true }
-      android_runtime_minutes: { description: '⏳ Android 模拟器运行时间（分钟）', required: false, type: number, default: 300 }
+      # --- 以下为被注释掉的 Android 相关输入 ---
+      # run_android_container: { description: '🚀 (已禁用) 是否启动 Android 模拟器服务?', required: false, type: boolean, default: false }
+      # android_runtime_minutes: { description: '⏳ (已禁用) Android 模拟器运行时间（分钟）', required: false, type: number, default: 300 }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
@@ -48,18 +49,18 @@ env:
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
   
-  # Android AVD
-  ANDROID_AVD_BACKUP_PREFIX: android_avd_backup_
-  B2_REMOTE_NAME_2: "b2_storage_2"
-  B2_REMOTE_PATH_2: "backup/android"
-  B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
-  B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
-  B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
-  B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
+  # --- 以下为被注释掉的 Android 相关环境变量 ---
+  # ANDROID_AVD_BACKUP_PREFIX: android_avd_backup_
+  # B2_REMOTE_NAME_2: "b2_storage_2"
+  # B2_REMOTE_PATH_2: "backup/android"
+  # B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+  # B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+  # B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+  # B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.5 - AVD Emulator + B2 Backup)"
+    name: "Run All Services (v7.6 - Chroot Only Debug Build)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -67,6 +68,7 @@ jobs:
 
       - name: 2. 最大化运行器磁盘空间
         run: |
+          # 注意：Android模拟器非常消耗空间，如果未来重新启用，此步骤很重要
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo apt-get autoremove -y && sudo apt-get autoclean -y
           sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
@@ -158,7 +160,8 @@ jobs:
       - name: 11A. 启动 Chroot 内服务
         if: github.event_name == 'schedule' || github.event.inputs.run_startup_script == 'true'
         env:
-          RUNTIME_MINUTES: ${{ (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all') && 90 || 350 }}
+          # 注意：这里的运行时长计算已简化，因为没有 Android 备份了
+          RUNTIME_MINUTES: ${{ github.event.inputs.backup_mode == 'chroot' && 90 || 350 }}
         run: |
           echo "✅ 准备启动 Chroot 内服务..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
@@ -181,49 +184,29 @@ jobs:
         uses: lhotari/action-upterm@v1
         with: { limit-access-to-actor: true, wait-timeout-minutes: ${{ github.event.inputs.ssh_timeout_minutes }} }
 
-      - name: 11C-Restore. 从 B2 恢复 AVD 备份
-        if: github.event.inputs.run_android_container == 'true' || github.event_name == 'schedule'
-        run: |
-          echo "--- 准备从 B2 恢复 AVD 备份 ---"
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
-          B2_FULL_PATH_2="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
-          LATEST_AVD_BACKUP=$(rclone lsjson ${B2_FULL_PATH_2}/ | jq -r '[.[] | select(.Name | test("${{ env.ANDROID_AVD_BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
-          if [[ -n "$LATEST_AVD_BACKUP" && "$LATEST_AVD_BACKUP" != "null" ]]; then
-            echo "   -> 发现备份: ${LATEST_AVD_BACKUP}. 下载并解压中..."
-            rclone copyto "${B2_FULL_PATH_2}/${LATEST_AVD_BACKUP}" "/tmp/avd_backup.tar.zst" ${{ env.RCLONE_FLAGS }}
-            mkdir -p ~/.android/avd
-            unzstd -c /tmp/avd_backup.tar.zst | tar -xpf - -C ~/.android/avd
-            rm -f /tmp/avd_backup.tar.zst
-            echo "✅ AVD 备份恢复成功。"
-          else
-            echo "   -> 未找到 AVD 备份，将创建全新的模拟器。"
-          fi
+      # --- 以下为被注释掉的 Android 相关步骤 ---
+      # - name: 11C-Restore. 从 B2 恢复 AVD 备份
+      #   if: false # 总是禁用
+      #   run: |
+      #     echo "--- (已禁用) 准备从 B2 恢复 AVD 备份 ---"
 
-      - name: 11C-Run. 启动 Android 模拟器 (ReactiveCircus)
-        if: github.event.inputs.run_android_container == 'true' || github.event_name == 'schedule'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          target: google_apis
-          abi: x86_64
-          emulator-options: >-
-            -no-window -gpu swiftshader_indirect -no-snapshot
-            -no-audio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: |
-            echo "✅ 模拟器已完全启动并准备就绪!"
-            adb devices
-            ANDROID_RUNTIME=${{ github.event.inputs.android_runtime_minutes }}
-            echo "Android 模拟器将持续运行 ${ANDROID_RUNTIME} 分钟..."
-            sleep ${ANDROID_RUNTIME}m
-            echo "⏳ 规定运行时间已到。"
+      # - name: 11C-Run. 启动 Android 模拟器 (ReactiveCircus)
+      #   if: false # 总是禁用
+      #   uses: reactivecircus/android-emulator-runner@v2
+      #   with:
+      #     api-level: 30
+      #     target: google_apis
+      #     abi: x86_64
+      #     script: |
+      #       echo "✅ (已禁用) 模拟器已启动!"
+      #       sleep 1m
 
       - name: 12. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
       - name: 13. ⚡️ [极致压缩] 创建 Chroot 版本化备份
-        if: success() && !cancelled() && (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all')
+        if: success() && !cancelled() && github.event.inputs.backup_mode == 'chroot'
         run: |
           echo "--- 1. 创建 Chroot 备份并上传至 B2 ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
@@ -239,21 +222,11 @@ jobs:
           echo "--- 2. 清理 B2 上的旧 Chroot 备份 (保留2个最新) ---"
           ( set +e; FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null) || true; if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "$FILES_TO_DELETE" | while read file_name; do rclone deletefile "${B2_FULL_PATH}/${file_name}"; done; echo "✅ 旧 Chroot 备份清理完毕。"; else echo "无需清理。"; fi )
 
-      - name: 13B. ⚡️ [独立备份] 创建 Android AVD 版本化备份
-        if: success() && !cancelled() && (github.event.inputs.backup_mode == 'android' || github.event.inputs.backup_mode == 'all')
-        run: |
-          echo "--- 1. 创建 Android AVD 备份并上传至 B2_2 ---"
-          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
-          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
-          NEW_AVD_BACKUP_FILE="${{ env.ANDROID_AVD_BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
-          B2_FULL_PATH_2="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
-          AVD_DIR=~/.android/avd
-          if [ ! -d "$AVD_DIR" ]; then echo "❌ 未找到 AVD 目录 (${AVD_DIR})，跳过备份。"; exit 0; fi
-          echo "正在打包、压缩和上传 AVD 目录: ${AVD_DIR}"
-          tar -c -f - -C ${AVD_DIR} . | zstd -T0 -c | rclone rcat ${B2_FULL_PATH_2}/${NEW_AVD_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新 AVD 备份上传成功。"
-          echo "--- 2. 清理 B2_2 上的旧 AVD 备份 (保留2个最新) ---"
-          ( set +e; FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH_2}/ | jq -r '[.[] | select(.Name | test("${{ env.ANDROID_AVD_BACKUP_PREFIX }}.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null) || true; if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then echo "$FILES_TO_DELETE" | while read file_name; do rclone deletefile "${B2_FULL_PATH_2}/${file_name}"; done; echo "✅ 旧 AVD 备份清理完毕。"; else echo "无需清理。"; fi )
+      # --- 以下为被注释掉的 Android 备份步骤 ---
+      # - name: 13B. ⚡️ [独立备份] 创建 Android AVD 版本化备份
+      #   if: false # 总是禁用
+      #   run: |
+      #     echo "--- (已禁用) 创建 Android AVD 备份 ---"
 
       - name: 14. 清理运行器残留文件
         if: always()
