@@ -1,9 +1,18 @@
-name: CI with Persistent Environment (v7.5 - Serialized Python Deps + Android Container)
+name: CI with Persistent Environment (v7.4 - Serialized Python Deps + Android Container)
 
 on:
   workflow_dispatch:
     inputs:
-      create_backup_on_finish: { description: '✅ [核心] 是否在结束时创建环境备份? (这将影响运行时长)', required: true, type: boolean, default: false }
+      backup_mode:
+        description: '✅ [核心] 选择在结束时创建的环境备份模式'
+        required: true
+        type: choice
+        default: 'none'
+        options:
+          - 'none'
+          - 'chroot'
+          - 'android'
+          - 'all'
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       ssh_timeout_minutes: { description: '⏳ SSH会话超时时间（分钟）', required: false, type: number, default: 350 }
@@ -12,8 +21,7 @@ on:
       enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务? (包含 openlist)', type: boolean, default: true }
       run_android_container: { description: '🚀 是否启动 Android 容器服务?', required: true, type: boolean, default: true }
-      create_android_backup_on_finish: { description: '✅ 是否在结束时创建 Android 环境备份? (独立备份流程)', required: true, type: boolean, default: false }
-      android_runtime_minutes: { description: '⏳ Android 容器运行时间（分钟）', required: false, type: number, default: 60 }
+      android_runtime_minutes: { description: '⏳ Android 容器运行时间（分钟）, 可设置为 300 或 200', required: false, type: number, default: 300 }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
@@ -167,7 +175,7 @@ jobs:
       - name: 11A. 启动 Chroot 内服务
         if: github.event_name == 'schedule' || github.event.inputs.run_startup_script == 'true'
         env:
-          RUNTIME_MINUTES: ${{ github.event.inputs.create_backup_on_finish == 'true' && 90 || 350 }}
+          RUNTIME_MINUTES: ${{ (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all') && 90 || 350 }}
         run: |
           echo "✅ 准备启动 Chroot 内服务..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
@@ -228,7 +236,7 @@ jobs:
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
 
       - name: 13. ⚡️ [极致压缩] 创建版本化备份 (zstd-22 --long)
-        if: success() && !cancelled() && github.event.inputs.create_backup_on_finish == 'true'
+        if: success() && !cancelled() && (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all')
         run: |
           echo "--- 1. 使用 zstd-22 --long 创建备份并上传至 B2 ---"
           # 停止 chroot 内和外部的所有 pm2 服务
@@ -269,7 +277,7 @@ jobs:
           )
 
       - name: 13B. ⚡️ [独立备份] 创建 Android 版本化备份 (zstd-22 --long)
-        if: success() && !cancelled() && github.event.inputs.create_android_backup_on_finish == 'true'
+        if: success() && !cancelled() && (github.event.inputs.backup_mode == 'android' || github.event.inputs.backup_mode == 'all')
         run: |
           echo "--- 1. 使用 zstd-22 --long 创建 Android 备份并上传至 B2_2 ---"
           # 停止 Android 容器
