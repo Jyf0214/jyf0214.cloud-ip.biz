@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v7.4 - Serialized Python Deps)
+name: CI with Persistent Environment (v7.4 - Serialized Python Deps + Android Container)
 
 on:
   workflow_dispatch:
@@ -11,6 +11,9 @@ on:
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
       enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务? (包含 openlist)', type: boolean, default: true }
+      run_android_container: { description: '🚀 是否启动 Android 容器服务?', required: true, type: boolean, default: true }
+      create_android_backup_on_finish: { description: '✅ 是否在结束时创建 Android 环境备份? (独立备份流程)', required: true, type: boolean, default: false }
+      android_runtime_minutes: { description: '⏳ Android 容器运行时间（分钟）', required: false, type: number, default: 60 }
   schedule:
     - cron: '30 */6 * * *'
 concurrency:
@@ -33,20 +36,33 @@ env:
   B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
+  ANDROID_DATA_DIR: /mnt/android_data
+  ANDROID_BACKUP_PREFIX: android_backup_
+  B2_REMOTE_NAME_2: "b2_storage_2"
+  B2_REMOTE_PATH_2: "backup/android"
+  B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+  B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+  B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+  B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.4 - Serialized Python Deps)"
+    name: "Run All Services (v7.4 - Serialized Python Deps + Android Container)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
         uses: actions/checkout@v4
 
       - name: 2. 最大化运行器磁盘空间
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get autoremove -y && sudo apt-get autoclean -y
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+          sudo docker system prune -a -f || true
+          echo "✅ 磁盘空间优化完成。当前可用空间: $(df -h / | tail -1 | awk '{print $4}')"
 
       - name: 3. 安装基础系统依赖
-        run: sudo apt-get install -y debootstrap rclone pigz zstd jq
+        run: sudo apt-get install -y debootstrap rclone pigz zstd jq docker.io
 
       - name: 4. 设置 Python 环境
         uses: actions/setup-python@v4
@@ -64,30 +80,31 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-deps-
 
-      # [逻辑变更] 仅并行准备 Chroot 环境和 Node.js
-      - name: 7. ⚡️ 并行准备：恢复Chroot & 安装NodeJS
+      - name: 7. ⚡️ 并行准备：恢复Chroot & 安装NodeJS & 准备Android数据目录
         id: prepare_all
         run: |
-          CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp)
+          CHROOT_LOG=$(mktemp); NODE_LOG=$(mktemp); ANDROID_LOG=$(mktemp)
           ( echo "--- [并行A] 开始: 恢复/创建 Chroot 环境..."; set -eo pipefail; sudo mkdir -p ${{ env.CHROOT_DIR }}; echo "[并行A] 正在配置 Rclone B2 远程..."; rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"; B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"; echo "[并行A] B2 远程路径: ${B2_FULL_PATH}"; echo "[并行A] 正在查找最新备份..."; LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then echo "   -> [并行A] 发现备份: ${LATEST_BACKUP_FILENAME}. 正在下载..."; LOCAL_BACKUP_PATH="/tmp/backup.archive"; rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_FILENAME}" ${LOCAL_BACKUP_PATH} ${{ env.RCLONE_FLAGS }}; echo "   -> [并行A] 下载完成. 正在解压..."; if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then unzstd -c ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; else pigz -dc ${LOCAL_BACKUP_PATH} | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; fi; rm -f ${LOCAL_BACKUP_PATH}; echo "restored=true" > /tmp/chroot_status; else echo "   -> [并行A] 备份未找到. 正在创建全新系统 (debootstrap)..."; sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/; echo "restored=false" > /tmp/chroot_status; fi; echo "--- [并行A] ✅ 完成: Chroot 环境准备就绪 ---"; ) > ${CHROOT_LOG} 2>&1 &
           CHROOT_PID=$!
           ( echo "--- [并行B] 开始: 安装 Node.js & PM2..."; curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -; sudo apt-get install -y nodejs; sudo npm install -g pm2; echo "--- [并行B] ✅ 完成: Node.js & PM2 安装完毕 ---"; ) > ${NODE_LOG} 2>&1 &
           NODE_PID=$!
-          
+          ( echo "--- [并行C] 开始: 准备 Android 数据目录 & 恢复备份..."; sudo mkdir -p ${{ env.ANDROID_DATA_DIR }}; echo "[并行C] 配置 Android Rclone B2_2 远程..."; rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}" download_url "${{ env.B2_DOWNLOAD_URL_2 }}"; B2_FULL_PATH_2="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"; LATEST_ANDROID_BACKUP=$(rclone lsjson ${B2_FULL_PATH_2}/ | jq -r '[.[] | select(.Name | test("android_backup_.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null); if [[ -n "$LATEST_ANDROID_BACKUP" && "$LATEST_ANDROID_BACKUP" != "null" ]]; then echo "   -> [并行C] 发现 Android 备份: ${LATEST_ANDROID_BACKUP}. 下载中..."; LOCAL_ANDROID_BACKUP="/tmp/android_backup.zst"; rclone copyto "${B2_FULL_PATH_2}/${LATEST_ANDROID_BACKUP}" ${LOCAL_ANDROID_BACKUP} ${{ env.RCLONE_FLAGS }}; echo "   -> [并行C] 下载完成. 解压中..."; unzstd -c ${LOCAL_ANDROID_BACKUP} | sudo tar -xpf - -C ${{ env.ANDROID_DATA_DIR }}; rm -f ${LOCAL_ANDROID_BACKUP}; echo "android_restored=true" > /tmp/android_status; else echo "   -> [并行C] 无备份. 创建空目录."; echo "android_restored=false" > /tmp/android_status; fi; echo "--- [并行C] ✅ 完成: Android 数据准备就绪 ---"; ) > ${ANDROID_LOG} 2>&1 &
+          ANDROID_PID=$!
+
           echo "⏳ 等待并行任务完成..."; FAIL=0
           wait ${CHROOT_PID}; CHROOT_EC=$?; echo "--- 📜 Chroot 任务日志 ---"; cat ${CHROOT_LOG}; if [[ $CHROOT_EC -ne 0 ]]; then echo "❌ [并行A] Chroot 任务失败 (退出码: $CHROOT_EC)!"; FAIL=1; else echo "✅ [并行A] Chroot 任务成功。"; fi
           wait ${NODE_PID}; NODE_EC=$?; echo "--- 📜 Node.js 任务日志 ---"; cat ${NODE_LOG}; if [[ $NODE_EC -ne 0 ]]; then echo "❌ [并行B] Node.js 任务失败 (退出码: $NODE_EC)!"; FAIL=1; else echo "✅ [并行B] Node.js 任务成功。"; fi
-          
+          wait ${ANDROID_PID}; ANDROID_EC=$?; echo "--- 📜 Android 准备任务日志 ---"; cat ${ANDROID_LOG}; if [[ $ANDROID_EC -ne 0 ]]; then echo "❌ [并行C] Android 准备任务失败 (退出码: $ANDROID_EC)!"; FAIL=1; else echo "✅ [并行C] Android 准备任务成功。"; fi
+
           if [[ $FAIL -eq 1 ]]; then echo "一个或多个准备任务失败，终止工作流。"; exit 1; fi
-          
+
           echo "✅ 所有准备任务成功完成!"
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
+          ANDROID_STATUS=$(cat /tmp/android_status); echo "android_restored=${ANDROID_STATUS}" >> $GITHUB_OUTPUT
 
-      # [逻辑变更] 依赖安装和应用启动现在合并在一步
       - name: 8. 安装依赖并启动 Python 应用
         run: |
           nohup bash -c 'echo "--- 开始安装 Python 应用依赖..." && cd chatgpt-on-wechat && python -m pip install --upgrade pip && pip install -r requirements-optional.txt --target ./lib --cache-dir ~/.cache/pip || true && pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip || true && echo "--- ✅ 依赖安装完成。正在启动应用..." && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
-
 
       - name: 9. 挂载虚拟文件系统
         run: |
@@ -184,6 +201,28 @@ jobs:
           limit-access-to-actor: true
           wait-timeout-minutes: ${{ github.event.inputs.ssh_timeout_minutes }}
 
+      - name: 11C. 启动 Android 容器 (独立脚本启动)
+        if: github.event.inputs.run_android_container == 'true' || github.event_name == 'schedule'
+        run: |
+          echo "--- 开始启动 Android 容器 (独立于 Chroot) ---"
+          sudo tee /tmp/start_android.sh > /dev/null << 'EOF'
+          #!/bin/bash
+          set -e
+          export ANDROID_DATA_DIR='${{ env.ANDROID_DATA_DIR }}'
+          echo "1. 启动 Docker 服务..."; sudo systemctl start docker || true
+          echo "2. 拉取 Android 镜像..."; sudo docker pull budtmo/docker-android:emulator_9.0
+          echo "3. 启动 Android 容器..."; sudo docker run -d --privileged --name maa-android-9 -p 5555:5555 -p 6080:6080 -v "${ANDROID_DATA_DIR}:/data" budtmo/docker-android:emulator_9.0
+          echo "✅ Android 容器已启动。暴露端口: 5555 (ADB), 6080 (VNC)。数据存储于 ${ANDROID_DATA_DIR}"
+          EOF
+          sudo chmod +x /tmp/start_android.sh
+          /tmp/start_android.sh
+
+          ANDROID_RUNTIME=${{ github.event.inputs.android_runtime_minutes || 60 }}
+          echo "Android 容器将运行 ${ANDROID_RUNTIME} 分钟..."
+          sleep ${ANDROID_RUNTIME}m
+          echo "⏳ Android 运行时间已到。停止容器..."
+          sudo docker stop maa-android-9 || true
+
       - name: 12. 卸载虚拟文件系统
         if: always()
         run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
@@ -214,20 +253,62 @@ jobs:
           echo "✅ 新备份上传成功。"
 
           echo "--- 2. 清理 B2 上的旧备份 (保留2个最新) ---"
-          FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\.tar\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null)
-          if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
-            echo "将要删除以下旧备份:"
-            echo "$FILES_TO_DELETE"
-            for file_name in $FILES_TO_DELETE; do
-              rclone deletefile "${B2_FULL_PATH}/${file_name}"
-            done
-            echo "✅ 旧备份清理完毕。"
-          else
-            echo "无需清理，备份数量小于或等于2。"
-          fi
+          (
+            set +e
+            FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null) || true
+            if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
+              echo "将要删除以下旧备份:"
+              echo "$FILES_TO_DELETE"
+              for file_name in $FILES_TO_DELETE; do
+                rclone deletefile "${B2_FULL_PATH}/${file_name}" || true
+              done
+              echo "✅ 旧备份清理完毕。"
+            else
+              echo "无需清理，备份数量小于或等于2。"
+            fi
+          )
+
+      - name: 13B. ⚡️ [独立备份] 创建 Android 版本化备份 (zstd-22 --long)
+        if: success() && !cancelled() && github.event.inputs.create_android_backup_on_finish == 'true'
+        run: |
+          echo "--- 1. 使用 zstd-22 --long 创建 Android 备份并上传至 B2_2 ---"
+          # 停止 Android 容器
+          sudo docker stop maa-android-9 || true
+
+          # 配置 rclone for Android
+          rclone config create ${{ env.B2_REMOTE_NAME_2 }} b2 account "${{ env.B2_KEY_ID_2 }}" key "${{ env.B2_APPLICATION_KEY_2 }}"
+
+          # 生成带时间戳的文件名
+          TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
+          NEW_ANDROID_BACKUP_FILE="${{ env.ANDROID_BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
+          B2_FULL_PATH_2="${{ env.B2_REMOTE_NAME_2 }}:${{ env.B2_BUCKET_NAME_2 }}/${{ env.B2_REMOTE_PATH_2 }}"
+
+          # 定义 tar 排除选项 (针对 Android 数据)
+          EXCLUDE_OPTS="--exclude='*.log' --exclude='tmp' --exclude='.cache'"
+
+          # 执行打包、极致压缩和上传 (独立于主备份，避免资源竞争)
+          echo "正在执行 Tar 和 Zstandard 极致压缩 (Android 数据)，这可能需要很长时间..."
+          sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.ANDROID_DATA_DIR }} . | zstd -T0 -22 --long -c | rclone rcat ${B2_FULL_PATH_2}/${NEW_ANDROID_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
+          echo "✅ 新 Android 备份上传成功。"
+
+          echo "--- 2. 清理 B2_2 上的旧 Android 备份 (保留2个最新) ---"
+          (
+            set +e
+            FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH_2}/ | jq -r '[.[] | select(.Name | test("android_backup_.*\\.tar\\.zst$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null) || true
+            if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
+              echo "将要删除以下旧 Android 备份:"
+              echo "$FILES_TO_DELETE"
+              for file_name in $FILES_TO_DELETE; do
+                rclone deletefile "${B2_FULL_PATH_2}/${file_name}" || true
+              done
+              echo "✅ 旧 Android 备份清理完毕。"
+            else
+              echo "无需清理，备份数量小于或等于2。"
+            fi
+          )
 
       - name: 14. 清理运行器残留文件
         if: always()
         run: |
-          echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }}; rm -rf chatgpt-on-wechat
-          sudo npm cache clean --force || true; pip cache purge || true; echo "✅ 运行器清理完成。"
+          echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }} ${{ env.ANDROID_DATA_DIR }}; rm -rf chatgpt-on-wechat
+          sudo npm cache clean --force || true; pip cache purge || true; sudo docker system prune -a -f || true; echo "✅ 运行器清理完成。"
