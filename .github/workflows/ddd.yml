@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v7.4 - Serialized Python Deps + Android Container)
+name: CI with Persistent Environment (v7.5 - Serialized Python Deps + Android Container)
 
 on:
   workflow_dispatch:
