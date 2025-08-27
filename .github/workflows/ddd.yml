@@ -164,8 +164,9 @@ jobs:
           cd /root
           
           # 安静模式下更新源并安装依赖
-          echo "[OpenList Updater] Updating apt sources and installing curl/jq..."
-          apt-get update >/dev/null && apt-get install -y curl jq >/dev/null
+          echo "[OpenList Updater] Updating apt sources and installing curl/jq/wget..."
+          # --- 修正点在这里：在 install 列表中加入了 wget ---
+          apt-get update >/dev/null && apt-get install -y curl jq wget >/dev/null
           
           # 获取最新的版本号
           echo "[OpenList Updater] Fetching the latest release tag..."
