@@ -1,4 +1,4 @@
-name: CI with Persistent Environment (v7.4 - Chroot Only Debug)
+name: CI with Persistent Environment (v7.4 - Chroot Only Debug Fixed SSH Custom)
 
 on:
   workflow_dispatch:
@@ -57,7 +57,7 @@ env:
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.4 - Chroot Only Debug)"
+    name: "Run All Services (v7.4 - Chroot Only Debug Fixed SSH Custom)"
     runs-on: ubuntu-latest
     steps:
       - name: 1. 检出工作流代码
@@ -246,12 +246,73 @@ jobs:
             echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH
+      - name: 11B. [手动调试路径] 启用 SSH (仓库所有者密钥验证)
         if: github.event.inputs.enable_ssh == 'true'
-        uses: lhotari/action-upterm@v1
-        with:
-          limit-access-to-actor: true
-          wait-timeout-minutes: ${{ github.event.inputs.ssh_timeout_minutes }}
+        run: |
+          set -e # 确保任何命令失败都会中止脚本
+          echo "--- 1. 准备 SSH 验证环境 ---"
+          # 从 GitHub API 获取仓库所有者的公钥
+          OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
+          echo "正在从 ${OWNER_KEYS_URL} 获取公钥..."
+          
+          # 创建 .ssh 目录并设置正确权限
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # 使用 curl 和 jq 获取并格式化密钥，然后写入 authorized_keys
+          # 使用 --fail 确保在 HTTP 请求失败时 curl 会返回非零退出码
+          curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > ~/.ssh/authorized_keys
+          
+          # 检查 authorized_keys 文件是否为空，如果为空则说明没有获取到密钥
+          if [ ! -s ~/.ssh/authorized_keys ]; then
+            echo "::error::无法从 GitHub API 获取 ${{ github.repository_owner }} 的公钥，或者该用户没有设置公钥。"
+            echo "请在 https://github.com/settings/keys 确认已添加 SSH 公钥。"
+            exit 1
+          fi
+
+          # 设置 authorized_keys 的正确权限
+          chmod 600 ~/.ssh/authorized_keys
+          echo "✅ 成功将 ${{ github.repository_owner }} 的公钥写入 authorized_keys。"
+          
+          echo "--- 2. 安装并配置 tmate ---"
+          sudo apt-get update
+          sudo apt-get install -y tmate
+          
+          echo "--- 3. 启动 tmate 会话 ---"
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          echo "===================================================================================="
+          echo "✅ SSH 会话已准备就绪。请使用与您 GitHub 账户关联的 SSH 私钥进行连接。"
+          echo "连接命令: $SSH_CMD"
+          echo "注意: 首次连接时，系统可能会提示您确认主机的真实性，请输入 'yes'。"
+          echo "===================================================================================="
+          echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
+          echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时，并强制断开所有连接。"
+          
+          START_TIME=$(date +%s)
+          TIMEOUT_SECONDS=$(( ${{ github.event.inputs.ssh_timeout_minutes }} * 60 ))
+          
+          while true; do
+            if [ -f /tmp/debug_done ]; then
+              echo "✅ 检测到 /tmp/debug_done 文件，结束调试会话。"
+              rm -f /tmp/debug_done
+              break
+            fi
+            
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( CURRENT_TIME - START_TIME ))
+            if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+              echo "⏳ SSH 会话超时 (${{ github.event.inputs.ssh_timeout_minutes }} 分钟)，强制终止会话并自动继续工作流。"
+              break
+            fi
+            
+            sleep 10
+          done
+          
+          echo "--- 4. 清理 tmate ---"
+          tmate -S /tmp/tmate.sock kill-session || true
 
       - name: 12. 卸载虚拟文件系统
         if: always()
