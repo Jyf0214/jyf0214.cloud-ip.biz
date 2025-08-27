@@ -149,26 +149,31 @@ jobs:
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}; sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
 
-      - name: 10. [增强] 清理与更新 Chroot
+      - name: 10. [增强] Chroot 环境准备 (NodeJS & OpenList)
         run: |
           echo "--- 开始深度清理 Chroot 环境 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.npm"
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*"
           
+          # --- 修正点：在这里将 NodeJS 和 PM2 安装到 Chroot 内部 ---
+          echo "--- 安装 NodeJS 和 PM2 到 Chroot 环境 ---"
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c " \
+            apt-get update && \
+            apt-get install -y curl && \
+            curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+            apt-get install -y nodejs && \
+            npm install -g pm2 \
+          "
+
           echo "--- 自动更新 Chroot 内的 OpenList ---"
           # 使用 here-document 将脚本写入 Chroot 环境内的临时文件
           sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
           #!/usr/bin/env bash
           set -e
           
-          # 移动到目标目录
           cd /root
-          
-          # 安静模式下更新源并安装依赖
           echo "[OpenList Updater] Updating apt sources and installing curl/jq/wget..."
-          # --- 修正点在这里：在 install 列表中加入了 wget ---
           apt-get update >/dev/null && apt-get install -y curl jq wget >/dev/null
           
-          # 获取最新的版本号
           echo "[OpenList Updater] Fetching the latest release tag..."
           LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r '.tag_name' | head -n 1)
           if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
@@ -180,21 +185,17 @@ jobs:
           TARBALL="openlist-linux-${ARCH}.tar.gz"
           DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
           
-          # 下载最新的 OpenList
           echo "[OpenList Updater] Downloading ${LATEST_TAG} from ${DOWNLOAD_URL}..."
           wget -qO "${TARBALL}" "${DOWNLOAD_URL}"
           
-          # 创建临时目录用于解压，并设置退出时自动清理
           TMP_DIR=$(mktemp -d)
           trap "rm -rf ${TMP_DIR}" EXIT
           
-          # 解压并移动主程序
           echo "[OpenList Updater] Extracting and installing..."
           tar -zxf "${TARBALL}" -C "${TMP_DIR}"
           mv -f "${TMP_DIR}/openlist" ./openlist
           chmod +x ./openlist
           
-          # 清理下载的压缩包
           rm -f "${TARBALL}"
           
           echo "✅ OpenList 已成功更新至 ${LATEST_TAG}"
