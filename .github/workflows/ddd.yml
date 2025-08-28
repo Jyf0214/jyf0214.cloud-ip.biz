@@ -238,8 +238,11 @@ jobs:
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
           echo "🚀 服务已启动。"
-          if [[ "${{ github.event.inputs.enable_ssh }}" == 'false' ]]; then
-            echo "工作流将暂停 ${RUNTIME_MINUTES} 分钟 (SSH未启用)..."
+          
+          # --- 核心修正 ---
+          # 检查当前是否为自动计划任务，或者手动触发时 SSH 选项为 false
+          if [[ "${{ github.event_name }}" == 'schedule' || "${{ github.event.inputs.enable_ssh }}" == 'false' ]]; then
+            echo "工作流将暂停 ${RUNTIME_MINUTES} 分钟 (SSH未启用或自动运行)..."
             sleep ${RUNTIME_MINUTES}m
             echo "⏳ 规定运行时间已到。"
           else
