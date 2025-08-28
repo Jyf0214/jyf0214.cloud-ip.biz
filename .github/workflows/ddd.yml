@@ -246,13 +246,13 @@ jobs:
             echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH (强制所有者密钥验证 + 诊断信息)
+      - name: 11B. [手动调试路径] 启用 SSH (最终修复版 - 使用配置文件)
         if: github.event.inputs.enable_ssh == 'true'
         run: |
           set -e # 确保任何命令失败都会中止脚本
-          echo "--- 1. 获取仓库所有者 [${{ github.repository_owner }}] 的 SSH 公钥 ---"
+          echo "--- 1. 获取并准备仓库所有者 [${{ github.repository_owner }}] 的 SSH 公钥 ---"
           OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
-          AUTHORIZED_KEYS_FILE=$(mktemp)
+          AUTHORIZED_KEYS_FILE="/tmp/tmate_authorized_keys"
           
           if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > "${AUTHORIZED_KEYS_FILE}"; then
             echo "::error::从 GitHub API 获取公钥失败。请检查用户 [${{ github.repository_owner }}] 是否存在或网络是否正常。"
@@ -275,12 +275,18 @@ jobs:
           rm -f "${KEY_FILE_FOR_FINGERPRINT}"
           echo "--------------------------------------------------------------------------------"
           
-          echo "--- 3. 安装并配置 tmate 进行安全连接 ---"
+          echo "--- 3. 创建 tmate 配置文件以保证密钥被正确加载 ---"
+          TMATE_CONF_FILE="/tmp/tmate.conf"
+          # 这是修复问题的关键：通过配置文件预先设定授权密钥，避免竞争条件
+          echo "set-option -g tmate-authorized-keys \"${AUTHORIZED_KEYS_FILE}\"" > "${TMATE_CONF_FILE}"
+          echo "✅ tmate 配置文件创建成功。"
+
+          echo "--- 4. 安装并使用配置文件启动 tmate ---"
           sudo apt-get update && sudo apt-get install -y tmate
           
-          echo "--- 4. 启动 tmate 会话并强制执行密钥验证 ---"
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock set-option tmate-authorized-keys "${AUTHORIZED_KEYS_FILE}"
+          # 使用 -f 参数指定配置文件启动，保证安全设置在会话创建时就生效
+          tmate -f "${TMATE_CONF_FILE}" -S /tmp/tmate.sock new-session -d
+          
           tmate -S /tmp/tmate.sock wait tmate-ready
           
           SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
@@ -288,16 +294,14 @@ jobs:
           echo "✅ SSH 会话已准备就绪。只有 GitHub 用户 [${{ github.repository_owner }}] 的私钥才能连接。"
           echo "   -> 连接命令: $SSH_CMD"
           echo ""
-          echo "   [重要] 请进行以下验证："
-          echo "   1. 在您的 本地电脑终端 上运行以下命令，查看您本地私钥的指纹："
-          echo "      ssh-keygen -lf ~/.ssh/id_rsa  (如果您的密钥在其他位置，请替换路径)"
-          echo "   2. 对比您本地的指纹和上面日志中列出的 [授权公钥指纹]。"
-          echo "   3. 如果默认连接失败 (Permission denied)，说明您本地SSH客户端未使用正确的密钥。"
-          echo "      请使用 -i 参数明确指定与上方某个授权指纹匹配的私钥文件进行连接："
-          echo "      ssh -i /path/to/your/correct_private_key ${SSH_CMD#ssh }"
+          echo "   [重要] 如果仍然无法连接，请在您本地电脑执行以下操作进行最终诊断："
+          echo "   1. 运行 ssh-add -l 查看当前 ssh-agent 中加载的密钥指纹。"
+          echo "   2. 对比该指纹与上方日志中列出的 [授权公钥指纹] 是否匹配。"
+          echo "   3. 如果不匹配，请使用 ssh-add /path/to/your/correct_private_key 将正确的密钥添加进 agent。"
+          echo "   4. 如果您不使用 ssh-agent，请使用 ssh -i /path/to/your/correct_private_key ${SSH_CMD#ssh } 指定密钥连接。"
           echo "===================================================================================="
           echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
-          echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时，并强制断开所有连接。"
+          echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时。"
           
           START_TIME=$(date +%s)
           TIMEOUT_SECONDS=$(( ${{ github.event.inputs.ssh_timeout_minutes }} * 60 ))
@@ -321,7 +325,7 @@ jobs:
           
           echo "--- 5. 清理 tmate 及临时文件 ---"
           tmate -S /tmp/tmate.sock kill-session || true
-          rm -f "${AUTHORIZED_KEYS_FILE}"
+          rm -f "${AUTHORIZED_KEYS_FILE}" "${TMATE_CONF_FILE}"
 
       - name: 12. 卸载虚拟文件系统
         if: always()
