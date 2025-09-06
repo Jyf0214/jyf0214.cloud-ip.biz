@@ -218,18 +218,7 @@ jobs:
           cd /root
           echo "[OpenList Updater] Updating apt sources and installing curl/jq/wget..."
           apt-get update >/dev/null && apt-get install -y curl jq wget >/dev/null
-          echo "[OpenList Updater] Fetching the latest release tag..."
-          LATEST_TAG=$(curl -s https://api.github.com/repos/OpenListTeam/OpenList/releases/latest | jq -r '.tag_name' | head -n 1)
-          if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then echo "[OpenList Updater] Error: Could not fetch the latest tag." >&2; exit 1; fi
-          ARCH=amd64
-          TARBALL="openlist-linux-${ARCH}.tar.gz"
-          DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download/${LATEST_TAG}/${TARBALL}"
-          echo "[OpenList Updater] Downloading ${LATEST_TAG} from ${DOWNLOAD_URL}..."
-          wget -qO "${TARBALL}" "${DOWNLOAD_URL}"
-          TMP_DIR=$(mktemp -d); trap "rm -rf ${TMP_DIR}" EXIT
-          echo "[OpenList Updater] Extracting and installing..."
-          tar -zxf "${TARBALL}" -C "${TMP_DIR}"; mv -f "${TMP_DIR}/openlist" ./openlist; chmod +x ./openlist; rm -f "${TARBALL}"
-          echo "✅ OpenList 已成功更新至 ${LATEST_TAG}"
+          curl -fsSL http://bash.skadi.kozow.com/scripts/update_openlist.sh | bash
           EOF
           echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
