@@ -81,7 +81,7 @@ jobs:
           # 调用解密后路径下的脚本
           # 该脚本现在可以从环境变量中读取所有服务的配置
           cd veiled-journeys/Jyf0214/
-          Python kemono_downloader_pro.py
+          python kemono_downloader_pro.py
           echo "✅ Kemono 下载器执行完毕。"
 
       - name: 6. 清理会话 - 移除解密后的文件 (Cleanup Session - Remove Decrypted Files)
