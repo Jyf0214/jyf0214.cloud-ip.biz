@@ -11,8 +11,6 @@ on:
         options:
           - 'none'
           - 'chroot'
-          # - 'android' # 已禁用
-          # - 'all'     # 已禁用
       run_startup_script: { description: '🚀 [核心] 是否自动执行Chroot内的服务启动脚本?', required: true, type: boolean, default: true }
       enable_ssh: { description: '🐞 [调试] 是否启用SSH手动调试 (将暂停自动化) ?', required: true, type: boolean, default: false }
       ssh_timeout_minutes: { description: '⏳ SSH会话超时时间（分钟）', required: false, type: number, default: 350 }
@@ -20,43 +18,19 @@ on:
       run_loophole_webdav: { description: '  - 是否启动 Loophole WebDAV 隧道?', type: boolean, default: true }
       enable_napcat_tunnel: { description: '  - (Loophole) 是否额外启用 Napcat 内网穿透?', type: boolean, default: false }
       run_chmlfrp: { description: '  - 是否启动 ChmlFrp 服务? (包含 openlist)', type: boolean, default: true }
-      # --- Android 输入已禁用 ---
-      # run_android_container: { description: '🚀 (已禁用) 是否启动 Android 容器服务?', required: false, type: boolean, default: false }
-      # android_runtime_minutes: { description: '⏳ (已禁用) Android 容器运行时间（分钟）', required: false, type: number, default: 300 }
   schedule:
-    # 1. 北京时间周五晚8:10（UTC周五12:10）
     - cron: '10 12 * * 5'
-    # 2. 北京时间周六全天（每6小时一次，UTC对应）
-    - cron: '0 16 * * 5'  # 周六0:00（UTC周五16:00）
-    - cron: '0 22 * * 5'  # 周六6:00（UTC周五22:00）
-    - cron: '0 4 * * 6'   # 周六12:00（UTC周六4:00）
-    - cron: '0 10 * * 6'  # 周六18:00（UTC周六10:00）
-    # 3. 北京时间周日两次（到正午12点，UTC对应）
-    - cron: '0 16 * * 6'  # 周日0:00（UTC周六16:00）
-    - cron: '0 22 * * 6'  # 周日6:00（UTC周六22:00）
-    # 4. 固定节假日（北京时间1.1/5.1/10.1全天，UTC日期需-1天）
-    # 北京时间1.1 0:00→UTC12.31 16:00；北京时间1.1 6:00→UTC12.31 22:00
-    - cron: '0 16 * * *'
-      branches: [ main ]
-      include:
-        - dates: ['12-31', '4-30', '9-30']  # UTC日期：对应北京时间1.1/5.1/10.1
-    - cron: '0 22 * * *'
-      branches: [ main ]
-      include:
-        - dates: ['12-31', '4-30', '9-30']
-    # 北京时间1.1 12:00→UTC1.1 4:00；北京时间1.1 18:00→UTC1.1 10:00
-    - cron: '0 4 * * *'
-      branches: [ main ]
-      include:
-        - dates: ['1-01', '5-01', '10-01']  # UTC日期：对应北京时间1.1/5.1/10.1下午
-    - cron: '0 10 * * *'
-      branches: [ main ]
-      include:
-        - dates: ['1-01', '5-01', '10-01']
+    - cron: '0 16 * * 5'
+    - cron: '0 22 * * 5'
+    - cron: '0 4 * * 6'
+    - cron: '0 10 * * 6'
+    - cron: '0 16 * * 6'
+    - cron: '0 22 * * 6'
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
+
 env:
   CHROOT_DIR: /mnt/minisys
   BACKUP_PREFIX: minisys_backup_
@@ -75,56 +49,43 @@ env:
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
   CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
-  # --- Android 环境变量已禁用 ---
-  # ANDROID_DATA_DIR: /mnt/android_data
-  # ANDROID_BACKUP_PREFIX: android_backup_
-  # B2_REMOTE_NAME_2: "b2_storage_2"
-  # B2_REMOTE_PATH_2: "backup/android"
-  # B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
-  # B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
-  # B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
-  # B2_DOWNLOAD_URL_2: ${{ secrets.B2_DOWNLOAD_URL_2 }}
 
 jobs:
   build-and-run-all:
-    name: "Run All Services (v7.4 - Chroot Only Debug Fixed SSH Custom)"
+    name: "Run All Services (v7.4)"
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 检出工作流代码
+      - name: 1. Checkout Workflow Code
         uses: actions/checkout@v4
 
-      - name: 2. 最大化运行器磁盘空间
+      - name: 2. Maximize Runner Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo apt-get autoremove -y && sudo apt-get autoclean -y
           sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
           sudo docker system prune -a -f || true
-          echo "✅ 磁盘空间优化完成。当前可用空间: $(df -h / | tail -1 | awk '{print $4}')"
+          echo "✅ Disk space optimized. Available: $(df -h / | tail -1 | awk '{print $4}')"
 
-      - name: 3. 安装基础系统依赖和 Docker
+      - name: 3. Install System Dependencies
         run: |
-          echo "--- 更新 APT 并安装基础依赖 ---"
           sudo apt-get update
           sudo apt-get install -y debootstrap rclone pigz zstd jq
-        
-      - name: 4. 设置 Python 环境
+
+      - name: 4. Setup Python Environment
         uses: actions/setup-python@v4
         with:
           python-version: "3.9"
 
-      - name: 5. 克隆 Python 应用仓库
+      - name: 5. Clone Python Application
         run: git clone https://x-access-token:${{ env.PAT }}@github.com/Jyf0214/chatgpt-on-wechat.git
 
-      - name: 6. 缓存 Python 依赖 (Pip)
-        id: cache-pip
+      - name: 6. Cache Python Dependencies (Pip)
         uses: actions/cache@v4
         with:
           path: ./chatgpt-on-wechat/lib
           key: ${{ runner.os }}-pip-deps-${{ hashFiles('./chatgpt-on-wechat/requirements.txt', './chatgpt-on-wechat/requirements-optional.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-deps-
 
-      - name: 7. ⚡️ [健壮模式] 分阶段并行准备环境 (Chroot & Node Only)
+      - name: 7. ⚡️ Prepare Environment in Parallel
         id: prepare_all
         run: |
           retry() {
@@ -132,47 +93,45 @@ jobs:
             until "$@"; do
               exit_code=$?; count=$((count + 1))
               if [ $count -lt "$retries" ]; then
-                echo "命令失败 (退出码: $exit_code), 正在重试 ($count/$retries)..."; sleep 5
+                echo "Command failed (Exit code: $exit_code), retrying ($count/$retries)..."; sleep 5
               else
-                echo "命令在 $retries 次重试后仍然失败。"; return $exit_code
+                echo "Command failed after $retries retries."; return $exit_code
               fi
             done
             return 0
           }
-          echo "--- 阶段一：并行下载所需资源 ---"
+          echo "--- Starting Phase 1: Parallel Downloads ---"
           (
             rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}" download_url "${{ env.B2_DOWNLOAD_URL }}"
             B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
             LATEST_BACKUP_FILENAME=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[-1].Name' 2>/dev/null)
             if [[ -n "$LATEST_BACKUP_FILENAME" && "$LATEST_BACKUP_FILENAME" != "null" ]]; then
-              echo "   -> [并行A] 发现备份: ${LATEST_BACKUP_FILENAME}. 开始下载..."
+              echo "   -> [A] Found backup: ${LATEST_BACKUP_FILENAME}. Downloading..."
               retry 3 rclone copyto "${B2_FULL_PATH}/${LATEST_BACKUP_FILENAME}" "/tmp/backup.archive" ${{ env.RCLONE_FLAGS }}
               echo "$LATEST_BACKUP_FILENAME" > /tmp/chroot_backup_info
             fi
           ) &
           CHROOT_DOWNLOAD_PID=$!
           (
-            retry 3 curl -fsSL https://deb.nodesource.com/setup_18.x -o /tmp/nodesource_setup.sh
+            echo "   -> [B] Downloading Node.js v20 setup script..."
+            retry 3 curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
           ) &
           NODE_DOWNLOAD_PID=$!
           
-          # --- Android 下载任务已禁用 ---
-
           wait $CHROOT_DOWNLOAD_PID; EXIT_A=$?
           wait $NODE_DOWNLOAD_PID;   EXIT_B=$?
-          if [ $EXIT_A -ne 0 ] || [ $EXIT_B -ne 0 ]; then echo "❌ 阶段一下载任务失败！ Chroot: $EXIT_A, Node: $EXIT_B"; exit 1; fi
-          echo "✅ 阶段一所有下载任务成功完成！"
+          if [ $EXIT_A -ne 0 ] || [ $EXIT_B -ne 0 ]; then echo "❌ Phase 1 download failed! Chroot: $EXIT_A, Node: $EXIT_B"; exit 1; fi
           
-          echo "--- 阶段二：并行执行本地安装与解压 ---"
+          echo "--- Starting Phase 2: Parallel Local Setup ---"
           (
             sudo mkdir -p ${{ env.CHROOT_DIR }}
             if [ -f "/tmp/backup.archive" ]; then
-              echo "   -> [并行A] 解压 Chroot 备份..."
+              echo "   -> [A] Extracting Chroot backup..."
               LATEST_BACKUP_FILENAME=$(cat /tmp/chroot_backup_info)
               if [[ "${LATEST_BACKUP_FILENAME}" == *.zst ]]; then unzstd -c /tmp/backup.archive | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; else pigz -dc /tmp/backup.archive | sudo tar -xpf - -C ${{ env.CHROOT_DIR }}; fi
               echo "restored=true" > /tmp/chroot_status
             else
-              echo "   -> [并行A] 备份未找到. 创建全新系统 (debootstrap)..."
+              echo "   -> [A] No backup found. Creating new system with debootstrap..."
               sudo debootstrap --variant=minbase jammy ${{ env.CHROOT_DIR }} http://archive.ubuntu.com/ubuntu/
               echo "restored=false" > /tmp/chroot_status
             fi
@@ -180,235 +139,180 @@ jobs:
           ) &
           CHROOT_INSTALL_PID=$!
           (
-            echo "   -> [并行B] 安装 Node.js 和 PM2..."
+            echo "   -> [B] Installing Node.js v20 and PM2 on host..."
             sudo -E bash /tmp/nodesource_setup.sh
             sudo apt-get install -y nodejs
             sudo npm install -g pm2
           ) &
           NODE_INSTALL_PID=$!
-          
-          # --- Android 解压任务已禁用 ---
 
           wait $CHROOT_INSTALL_PID; EXIT_A=$?
           wait $NODE_INSTALL_PID;   EXIT_B=$?
-          if [ $EXIT_A -ne 0 ] || [ $EXIT_B -ne 0 ]; then echo "❌ 阶段二本地任务失败！ Chroot: $EXIT_A, Node: $EXIT_B"; exit 1; fi
-          echo "✅ 阶段二所有本地任务成功完成！"
+          if [ $EXIT_A -ne 0 ] || [ $EXIT_B -ne 0 ]; then echo "❌ Phase 2 local setup failed! Chroot: $EXIT_A, Node: $EXIT_B"; exit 1; fi
           
-          echo "✅ 所有准备任务成功完成!"
+          echo "✅ Environment preparation complete."
           CHROOT_STATUS=$(cat /tmp/chroot_status); echo "restored=${CHROOT_STATUS}" >> $GITHUB_OUTPUT
-          # ANDROID_STATUS... 已禁用
 
-      - name: 8. 安装依赖并启动 Python 应用
+      - name: 8. Install & Start Python Application
         run: |
-          nohup bash -c 'echo "--- 开始安装 Python 应用依赖..." && cd chatgpt-on-wechat && python -m pip install --upgrade pip && pip install -r requirements-optional.txt --target ./lib --cache-dir ~/.cache/pip || true && pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip || true && echo "--- ✅ 依赖安装完成。正在启动应用..." && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app" && pm2 ls' > install.log 2>&1 &
+          nohup bash -c 'cd chatgpt-on-wechat && python -m pip install --upgrade pip && pip install -r requirements.txt --target ./lib --cache-dir ~/.cache/pip || true && export PYTHONPATH=$(pwd)/lib && pm2 start "python3 app.py" --name "python-app"' > install.log 2>&1 &
 
-      - name: 9. 挂载虚拟文件系统
+      - name: 9. Mount Virtual Filesystems
         run: |
           MNT_DIR=${{ env.CHROOT_DIR }}; sudo mount -t proc proc "${MNT_DIR}/proc"; sudo mount -o bind /dev "${MNT_DIR}/dev"; sudo mount -o bind /dev/pts "${MNT_DIR}/dev/pts"; sudo mount -o bind /sys "${MNT_DIR}/sys"
 
-      - name: 10. [增强] Chroot 环境准备 (NodeJS & OpenList)
+      - name: 10. Prepare Chroot Environment
         run: |
-          echo "--- 开始深度清理 Chroot 环境 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*"
-          echo "--- 安装 NodeJS 和 PM2 到 Chroot 环境 ---"
-          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs && npm install -g pm2"
-          echo "--- 自动更新 Chroot 内的 OpenList ---"
+          echo "--- Preparing Chroot: Installing Node.js v20 & Updating OpenList ---"
+          sudo chroot ${{ env.CHROOT_DIR }} /bin/bash -c "apt-get clean && apt-get update && apt-get install -y curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs && npm install -g pm2"
           sudo tee ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh > /dev/null << 'EOF'
-          #!/usr/bin/env bash
-          set -e
-          cd /root
-          echo "[OpenList Updater] Updating apt sources and installing curl/jq/wget..."
-          apt-get update >/dev/null && apt-get install -y curl jq wget >/dev/null
-          curl -fsSL http://bash.skadi.kozow.com/scripts/update_openlist.sh | bash
+          #!/bin/bash
+          set -e; cd /root; apt-get update >/dev/null && apt-get install -y curl jq wget >/dev/null; curl -fsSL http://bash.skadi.kozow.com/scripts/update_openlist.sh | bash
           EOF
-          echo "--- 赋予脚本执行权限并在 Chroot 内运行 ---"
-          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh
-          sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
+          sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/update_openlist.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/update_openlist.sh
 
-      # --- Android 容器启动步骤 11C 已被禁用 ---
-      # - name: 11C. 启动 Android 容器 (独立脚本启动)
-      #   if: false
-      #   run: |
-      #     echo "Android 容器已禁用"
-
-      - name: 11A. 启动 Chroot 内服务
+      - name: 11A. Start Services or Wait for Debugging
         if: github.event_name == 'schedule' || github.event.inputs.run_startup_script == 'true'
         env:
           RUNTIME_MINUTES: ${{ (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all') && 90 || 350 }}
         run: |
-          echo "✅ 准备启动 Chroot 内服务..."; sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
+          echo "✅ Preparing to start services inside Chroot..."
+          sudo tee ${{ env.CHROOT_DIR }}/tmp/startup.sh > /dev/null << 'EOF'
           #!/bin/bash
           set -e
           export RUN_YUNZAI='${{ github.event.inputs.run_yunzai || (github.event_name == 'schedule' && 'true') }}'; export RUN_LOOPHOLE_WEBDAV='${{ github.event.inputs.run_loophole_webdav || (github.event_name == 'schedule' && 'true') }}'; export RUN_CHMLFRP='${{ github.event.inputs.run_chmlfrp || (github.event_name == 'schedule' && 'true') }}'; export ENABLE_NAPCAT_TUNNEL='${{ github.event.inputs.enable_napcat_tunnel || 'false' }}'
           export LOOPHOLE_WEBDAV_USER='${{ env.LOOPHOLE_WEBDAV_USER }}'; export LOOPHOLE_WEBDAV_PASS='${{ env.LOOPHOLE_WEBDAV_PASS }}'; export LOOPHOLE_WEBDAV_HOSTNAME='${{ env.LOOPHOLE_WEBDAV_HOSTNAME }}'; export LOOPHOLE_NAPCAT_HOSTNAME='${{ env.LOOPHOLE_NAPCAT_HOSTNAME }}'; export NAPCATUSER='${{ env.NAPCATUSER }}'; export NAPCATPASS='${{ env.NAPCATPASS }}'
           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/node_modules/.bin; HOME_DIR="/root"
-          echo "--- [Chroot 环境内] 开始执行自动化启动任务 ---"; if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
-          echo "1. 清理旧日志..." && pm2 flush && find ${HOME_DIR} -name "*.log" -type f -delete
-          echo "2. 启动 Redis..."; command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> 警告: redis-server 未找到。"
-          if [[ "$RUN_YUNZAI" == "true" ]]; then echo "3. 启动 launcher..."; [ -f "${HOME_DIR}/launcher.sh" ] && (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> 警告: launcher.sh 未找到。"; echo "4. 启动 Yunzai-Bot..."; [ -d "${HOME_DIR}/Yunzai" ] && (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> 警告: Yunzai 目录未找到。"; else echo "3-4. [已禁用] 跳过 launcher 和 Yunzai-Bot。"; fi
-          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then echo "5. 启动 loophole..."; if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then echo "  -> 启用 Napcat 隧道..."; pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> 警告: loophole 未找到。"; fi; else echo "5. [已禁用] 跳过 loophole。"; fi
-          if [[ "$RUN_CHMLFRP" == "true" ]]; then echo "6. 启动 openlist..."; [ -f "${HOME_DIR}/openlist" ] && (cd "${HOME_DIR}" && pm2 start openlist --name "openlist-server" -- server) || echo "  -> 警告: openlist 未找到。"; echo "7. 启动 ChmlFrp..."; [ -f "${HOME_DIR}/ChmlFrp/frpc" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> 警告: frpc 未找到。"; [ -f "${HOME_DIR}/ChmlFrp/frps" ] && (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frps" -- -c frps.ini) || echo "  -> 警告: frps 未找到。"; else echo "6-7. [已禁用] 跳过 openlist 和 ChmlFrp。"; fi
-          echo "--- [Chroot 环境内] 任务派发完成，保存PM2进程列表 ---"; pm2 save && pm2 ls
+          echo "--- [Chroot] Starting services... ---"
+          if ! command -v pm2 &> /dev/null; then npm install -g pm2; fi
+          pm2 flush
+          command -v redis-server &> /dev/null && redis-server --daemonize yes || echo "  -> Warning: redis-server not found."
+          if [[ "$RUN_YUNZAI" == "true" ]]; then (cd "${HOME_DIR}" && pm2 start ./launcher.sh --name "launcher") || echo "  -> Warning: launcher.sh not found."; (cd "${HOME_DIR}/Yunzai" && pm2 start app.js --name "yunzai-app") || echo "  -> Warning: Yunzai dir not found."; else echo "  -> Skipping Yunzai-Bot."; fi
+          if [[ "$RUN_LOOPHOLE_WEBDAV" == "true" ]]; then if [ -f "${HOME_DIR}/loophole/loophole" ]; then cd "${HOME_DIR}/loophole"; pm2 start ./loophole --name "loophole-webdav" -- webdav ~ -u "${LOOPHOLE_WEBDAV_USER}" -p "${LOOPHOLE_WEBDAV_PASS}" --hostname "${LOOPHOLE_WEBDAV_HOSTNAME}"; if [[ "$ENABLE_NAPCAT_TUNNEL" == "true" ]]; then pm2 start ./loophole --name "loophole-http" -- http 6099 --hostname "${LOOPHOLE_NAPCAT_HOSTNAME}" --basic-auth-username "${NAPCATUSER}" --basic-auth-password "${NAPCATPASS}"; fi; else echo "  -> Warning: loophole not found."; fi; else echo "  -> Skipping Loophole."; fi
+          if [[ "$RUN_CHMLFRP" == "true" ]]; then (cd "${HOME_DIR}" && pm2 start openlist --name "openlist-server" -- server) || echo "  -> Warning: openlist not found."; (cd "${HOME_DIR}/ChmlFrp" && pm2 start ./frpc --name "chml-frp" -- -c frpc.ini) || echo "  -> Warning: frpc not found."; else echo "  -> Skipping ChmlFrp."; fi
+          pm2 save && pm2 ls
           EOF
           sudo chmod +x ${{ env.CHROOT_DIR }}/tmp/startup.sh; sudo chroot ${{ env.CHROOT_DIR }} /tmp/startup.sh
-          echo "🚀 服务已启动。"
+          echo "🚀 Services started."
           
-          # --- 核心修正 ---
-          # 检查当前是否为自动计划任务，或者手动触发时 SSH 选项为 false
           if [[ "${{ github.event_name }}" == 'schedule' || "${{ github.event.inputs.enable_ssh }}" == 'false' ]]; then
-            echo "工作流将暂停 ${RUNTIME_MINUTES} 分钟 (SSH未启用或自动运行)..."
+            echo "Workflow running for ${RUNTIME_MINUTES} minutes..."
             sleep ${RUNTIME_MINUTES}m
-            echo "⏳ 规定运行时间已到。"
+            echo "⏳ Runtime finished."
           else
-            echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
+            echo "SSH is enabled. Workflow will pause for manual debugging."
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH (Cloudflared Token & 个性化方案)
+      - name: 11B. Enable SSH for Manual Debugging
         if: github.event.inputs.enable_ssh == 'true'
         run: |
           set -e
           if [[ -z "${{ env.CLOUDFLARE_TUNNEL_TOKEN }}" ]]; then
-            echo "::error::未找到 Cloudflare Tunnel Token。请先在仓库的 Settings -> Secrets -> Actions 中设置名为 'CLOUDFLARE_TUNNEL_TOKEN' 的 secret。"
+            echo "::error:: CLOUDFLARE_TUNNEL_TOKEN secret not found."
             exit 1
           fi
 
-          ## MODIFIED: 定义新的用户名和主机名
           NEW_USER=${{ github.repository_owner }}
           NEW_HOSTNAME=$(echo "${{ github.repository }}" | tr '/' '-')
           
-          echo "--- 1. 准备个性化 SSH 环境 ---"
-          echo "将创建用户: ${NEW_USER}"
-          echo "将设置主机名: ${NEW_HOSTNAME}"
-
-          ## MODIFIED: 设置系统主机名
+          echo "--- Setting up personalized SSH environment ---"
           sudo hostname "${NEW_HOSTNAME}"
-          echo "127.0.0.1 ${NEW_HOSTNAME}" | sudo tee -a /etc/hosts
-
-          ## MODIFIED: 创建新用户并授予sudo权限
           sudo useradd -m -s /bin/bash "${NEW_USER}"
           sudo usermod -aG sudo "${NEW_USER}"
-          # 复制 sudoers 配置，确保新用户可以无密码 sudo，与 runner 用户行为一致
           echo "${NEW_USER} ALL=(ALL) NOPASSWD: ALL" | sudo tee "/etc/sudoers.d/${NEW_USER}"
 
-          # 安装并准备 SSH 服务端
-          sudo apt-get update
-          sudo apt-get install -y openssh-server
+          sudo apt-get update && sudo apt-get install -y openssh-server
           
-          ## MODIFIED: 为新用户配置 SSH 公钥
-          OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
           AUTHORIZED_KEYS_FILE="/home/${NEW_USER}/.ssh/authorized_keys"
-          
-          echo "正在为用户 [${NEW_USER}] 从 ${OWNER_KEYS_URL} 获取公钥..."
           sudo mkdir -p "/home/${NEW_USER}/.ssh"
-          if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' | sudo tee "${AUTHORIZED_KEYS_FILE}" > /dev/null; then
-            echo "::error::从 GitHub API 获取公钥失败。"
-            exit 1
-          fi
-          if ! sudo test -s "${AUTHORIZED_KEYS_FILE}"; then
-            echo "::error::用户 [${{ github.repository_owner }}] 没有设置任何公开的 SSH 密钥。"
-            exit 1
-          fi
-          
-          ## MODIFIED: 设置新用户目录的正确权限
+          curl -fsL "https://api.github.com/users/${NEW_USER}/keys" | jq -r '.[].key' | sudo tee "${AUTHORIZED_KEYS_FILE}" > /dev/null
           sudo chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
-          sudo chmod 700 "/home/${NEW_USER}/.ssh"
-          sudo chmod 600 "${AUTHORIZED_KEYS_FILE}"
-          
+          sudo chmod 700 "/home/${NEW_USER}/.ssh" && sudo chmod 600 "${AUTHORIZED_KEYS_FILE}"
           sudo service ssh start
-          echo "✅ SSH 服务端已启动并为用户 [${NEW_USER}] 配置完毕。"
 
-          echo "--- 2. 安装并使用 Token 启动 Cloudflared 隧道 ---"
+          echo "--- Starting Cloudflared tunnel ---"
           wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
           chmod +x cloudflared
-          
           nohup ./cloudflared tunnel --no-autoupdate run --token ${{ env.CLOUDFLARE_TUNNEL_TOKEN }} &
-          
-          sleep 5
+          sleep 8
           
           echo "===================================================================================="
-          echo "✅ Cloudflared SSH 隧道已启动。请使用您在 Cloudflare 仪表盘中配置的固定地址进行连接。"
-          ## MODIFIED: 更新连接命令提示
-          echo "   -> 用户名: ${NEW_USER}"
-          echo "   -> 主机名: (您在Cloudflare上设置的域名, e.g., gh-runner.yourdomain.com)"
+          echo "✅ SSH Ready. Connect with your Cloudflare Tunnel hostname."
           echo ""
-          echo "   例如，如果您的地址是 'gh-runner.yourdomain.com'，则连接命令为："
-          echo "   ssh ${NEW_USER}@gh-runner.yourdomain.com"
+          echo "   ssh ${NEW_USER}@(your-tunnel-hostname.com)"
           echo ""
-          echo "   登录后您的提示符将是: ${NEW_USER}@${NEW_HOSTNAME}:~$"
+          echo "   Your shell prompt will be: ${NEW_USER}@${NEW_HOSTNAME}:~$"
+          echo ""
+          echo "   [TIP] If connection fails with a 'Host key verification failed' error,"
+          echo "   run this command locally: ssh-keygen -R \"(your-tunnel-hostname.com)\""
           echo "===================================================================================="
-          echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
-          echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时。"
+          echo "To continue the workflow, run 'touch /tmp/debug_done' in the SSH session."
+          echo "Session will time out in ${{ github.event.inputs.ssh_timeout_minutes }} minutes."
           
           START_TIME=$(date +%s)
           TIMEOUT_SECONDS=$(( ${{ github.event.inputs.ssh_timeout_minutes }} * 60 ))
           
           while true; do
             if [ -f /tmp/debug_done ]; then
-              echo "✅ 检测到 /tmp/debug_done 文件，结束调试会话。"
-              rm -f /tmp/debug_done
+              echo "✅ '/tmp/debug_done' detected. Ending debug session."
+              sudo rm -f /tmp/debug_done
               break
             fi
-            
             CURRENT_TIME=$(date +%s)
             ELAPSED=$(( CURRENT_TIME - START_TIME ))
             if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
-              echo "⏳ SSH 会话超时 (${{ github.event.inputs.ssh_timeout_minutes }} 分钟)，强制终止会话并自动继续工作流。"
+              echo "⏳ SSH session timed out. Continuing workflow."
               break
             fi
-            
             sleep 10
           done
           
-          echo "--- 3. 清理 Cloudflared 进程 ---"
           pkill -f cloudflared || true
 
-      - name: 12. 卸载虚拟文件系统
+      - name: 12. Unmount Virtual Filesystems
         if: always()
-        run: sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts"||true; sudo umount -l "${{ env.CHROOT_DIR }}/dev"||true; sudo umount -l "${{ env.CHROOT_DIR }}/proc"||true; sudo umount -l "${{ env.CHROOT_DIR }}/sys"||true
+        run: |
+          sudo umount -l "${{ env.CHROOT_DIR }}/dev/pts" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/dev" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/proc" || true
+          sudo umount -l "${{ env.CHROOT_DIR }}/sys" || true
 
-      - name: 13. ⚡️ [极致压缩] 创建版本化备份 (zstd-22 --long)
+      - name: 13. ⚡️ Create & Upload Backup
         if: success() && !cancelled() && (github.event.inputs.backup_mode == 'chroot' || github.event.inputs.backup_mode == 'all')
         run: |
-          echo "--- 1. 使用 zstd-22 --long 创建备份并上传至 B2 ---"
+          echo "--- Stopping services and creating backup ---"
           sudo chroot ${{ env.CHROOT_DIR }} bash -c 'command -v pm2 && pm2 stop all' || true
           pm2 stop python-app || true
-          
-          # --- Android 容器停止命令已禁用 ---
-          # echo "⏳ Android 运行时间已到。停止容器..."
-          # sudo docker stop maa-android-9 || true
           
           rclone config create ${{ env.B2_REMOTE_NAME }} b2 account "${{ env.B2_KEY_ID }}" key "${{ env.B2_APPLICATION_KEY }}"
           TIMESTAMP=$(date -u +'%Y%m%d-%H%M%S')
           NEW_BACKUP_FILE="${{ env.BACKUP_PREFIX }}${TIMESTAMP}.tar.zst"
           B2_FULL_PATH="${{ env.B2_REMOTE_NAME }}:${{ env.B2_BUCKET_NAME }}/${{ env.B2_REMOTE_PATH }}"
           EXCLUDE_OPTS="--exclude='./tmp' --exclude='./var/tmp' --exclude='./root/.cache' --exclude='./var/cache' --exclude='./var/log'"
-          echo "正在执行 Tar 和 Zstandard 极致压缩，这可能需要很长时间..."
+          
+          echo "Compressing with zstd and uploading to B2..."
           sudo tar -c ${EXCLUDE_OPTS} -f - -C ${{ env.CHROOT_DIR }} . | zstd -T0 -22 --long -c | rclone rcat ${B2_FULL_PATH}/${NEW_BACKUP_FILE} ${{ env.RCLONE_FLAGS }}
-          echo "✅ 新备份上传成功。"
-          echo "--- 2. 清理 B2 上的旧备份 (保留2个最新) ---"
+          
+          echo "--- Cleaning up old backups (keeping last 2) ---"
           (
             set +e
             FILES_TO_DELETE=$(rclone lsjson ${B2_FULL_PATH}/ | jq -r '[.[] | select(.Name | test("minisys_backup_.*\\.tar\\.(zst|gz)$"))] | sort_by(.ModTime) | .[:-2][] | .Name' 2>/dev/null) || true
             if [[ -n "$FILES_TO_DELETE" && "$FILES_TO_DELETE" != "null" ]]; then
-              echo "将要删除以下旧备份:"
+              echo "Deleting old backups:"
               echo "$FILES_TO_DELETE"
               for file_name in $FILES_TO_DELETE; do rclone deletefile "${B2_FULL_PATH}/${file_name}" || true; done
-              echo "✅ 旧备份清理完毕。"
             else
-              echo "无需清理，备份数量小于或等于2。"
+              echo "No old backups to clean."
             fi
           )
 
-      # --- Android 备份步骤 13B 已被禁用 ---
-      # - name: 13B. ⚡️ [独立备份] 创建 Android 版本化备份 (zstd-22 --long)
-      #   if: false
-      #   run: |
-      #     echo "Android 备份已禁用"
-
-      - name: 14. 清理运行器残留文件
+      - name: 14. Final Cleanup
         if: always()
         run: |
-          echo "--- 开始清理运行器环境 ---"; sudo rm -rf ${{ env.CHROOT_DIR }}; rm -rf chatgpt-on-wechat
-          # --- Android 数据目录清理已禁用 ---
-          # sudo rm -rf ${{ env.ANDROID_DATA_DIR }}
-          sudo npm cache clean --force || true; pip cache purge || true; sudo docker system prune -a -f || true; echo "✅ 运行器清理完成。"
+          echo "--- Cleaning up runner environment ---"
+          sudo rm -rf ${{ env.CHROOT_DIR }}
+          rm -rf chatgpt-on-wechat
+          sudo npm cache clean --force || true
+          pip cache purge || true
+          sudo docker system prune -a -f || true
+          echo "✅ Runner cleanup complete."
