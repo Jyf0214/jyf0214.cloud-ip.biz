@@ -27,20 +27,6 @@ jobs:
           git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
           echo "✅ Git user configured"
           
-      # --- 同步到 GitLab (极狐香港站) ---
-      # 仅当 GITLAB_TOKEN 被设置时才会运行此步骤
-      - name: Sync to GitLab (gitlab.hk)
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: |
-          echo "Syncing to GitLab (gitlab.hk)..."
-          # 使用 github 上下文变量构建 URL
-          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.hk/${{ github.repository_owner }}/${{ github.event.repository.name }}.git"
-          
-          # 推送所有分支和标签 (非强制)
-          git push --all gitlab
-          git push --tags gitlab
-          echo "✅ Synced to GitLab (gitlab.hk)"
           
       # --- 同步到 GitCode ---
       # 仅当 GITCODE_TOKEN 被设置时才会运行此步骤
