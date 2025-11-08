@@ -74,7 +74,6 @@ env:
   B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
-  # --- 新增环境变量 ---
   CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
   # --- Android 环境变量已禁用 ---
   # ANDROID_DATA_DIR: /mnt/android_data
@@ -264,7 +263,7 @@ jobs:
             echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH (Cloudflared Token 方案)
+      - name: 11B. [手动调试路径] 启用 SSH (Cloudflared Token & 个性化方案)
         if: github.event.inputs.enable_ssh == 'true'
         run: |
           set -e
@@ -273,46 +272,69 @@ jobs:
             exit 1
           fi
 
-          echo "--- 1. 准备 SSH 环境 ---"
+          ## MODIFIED: 定义新的用户名和主机名
+          NEW_USER=${{ github.repository_owner }}
+          NEW_HOSTNAME=$(echo "${{ github.repository }}" | tr '/' '-')
+          
+          echo "--- 1. 准备个性化 SSH 环境 ---"
+          echo "将创建用户: ${NEW_USER}"
+          echo "将设置主机名: ${NEW_HOSTNAME}"
+
+          ## MODIFIED: 设置系统主机名
+          sudo hostname "${NEW_HOSTNAME}"
+          echo "127.0.0.1 ${NEW_HOSTNAME}" | sudo tee -a /etc/hosts
+
+          ## MODIFIED: 创建新用户并授予sudo权限
+          sudo useradd -m -s /bin/bash "${NEW_USER}"
+          sudo usermod -aG sudo "${NEW_USER}"
+          # 复制 sudoers 配置，确保新用户可以无密码 sudo，与 runner 用户行为一致
+          echo "${NEW_USER} ALL=(ALL) NOPASSWD: ALL" | sudo tee "/etc/sudoers.d/${NEW_USER}"
+
+          # 安装并准备 SSH 服务端
           sudo apt-get update
           sudo apt-get install -y openssh-server
           
+          ## MODIFIED: 为新用户配置 SSH 公钥
           OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
-          AUTHORIZED_KEYS_FILE=~/.ssh/authorized_keys
-          mkdir -p ~/.ssh
+          AUTHORIZED_KEYS_FILE="/home/${NEW_USER}/.ssh/authorized_keys"
           
-          echo "正在从 ${OWNER_KEYS_URL} 获取公钥..."
-          if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > "${AUTHORIZED_KEYS_FILE}"; then
-            echo "::error::从 GitHub API 获取公钥失败。请检查用户 [${{ github.repository_owner }}] 是否存在或网络是否正常。"
+          echo "正在为用户 [${NEW_USER}] 从 ${OWNER_KEYS_URL} 获取公钥..."
+          sudo mkdir -p "/home/${NEW_USER}/.ssh"
+          if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' | sudo tee "${AUTHORIZED_KEYS_FILE}" > /dev/null; then
+            echo "::error::从 GitHub API 获取公钥失败。"
             exit 1
           fi
-          if [ ! -s "${AUTHORIZED_KEYS_FILE}" ]; then
+          if ! sudo test -s "${AUTHORIZED_KEYS_FILE}"; then
             echo "::error::用户 [${{ github.repository_owner }}] 没有设置任何公开的 SSH 密钥。"
-            echo "请访问 https://github.com/settings/keys 添加您的 SSH 公钥后重试。"
             exit 1
           fi
           
-          chmod 700 ~/.ssh && chmod 600 "${AUTHORIZED_KEYS_FILE}"
+          ## MODIFIED: 设置新用户目录的正确权限
+          sudo chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
+          sudo chmod 700 "/home/${NEW_USER}/.ssh"
+          sudo chmod 600 "${AUTHORIZED_KEYS_FILE}"
+          
           sudo service ssh start
-          echo "✅ SSH 服务端已启动并配置完毕。"
+          echo "✅ SSH 服务端已启动并为用户 [${NEW_USER}] 配置完毕。"
 
           echo "--- 2. 安装并使用 Token 启动 Cloudflared 隧道 ---"
           wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
           chmod +x cloudflared
           
-          # 在后台使用 Token 启动隧道
           nohup ./cloudflared tunnel --no-autoupdate run --token ${{ env.CLOUDFLARE_TUNNEL_TOKEN }} &
           
-          # 等待隧道连接建立
           sleep 5
           
           echo "===================================================================================="
           echo "✅ Cloudflared SSH 隧道已启动。请使用您在 Cloudflare 仪表盘中配置的固定地址进行连接。"
-          echo "   例如，如果您的地址是 'gh-runner.yourdomain.com'，则连接命令为："
-          echo "   ssh runner@gh-runner.yourdomain.com"
+          ## MODIFIED: 更新连接命令提示
+          echo "   -> 用户名: ${NEW_USER}"
+          echo "   -> 主机名: (您在Cloudflare上设置的域名, e.g., gh-runner.yourdomain.com)"
           echo ""
-          echo "   [重要] 'runner' 是 GitHub Actions 运行器上的默认用户名。"
-          echo "   如果连接失败，请检查您的本地SSH私钥是否已添加到ssh-agent。"
+          echo "   例如，如果您的地址是 'gh-runner.yourdomain.com'，则连接命令为："
+          echo "   ssh ${NEW_USER}@gh-runner.yourdomain.com"
+          echo ""
+          echo "   登录后您的提示符将是: ${NEW_USER}@${NEW_HOSTNAME}:~$"
           echo "===================================================================================="
           echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
           echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时。"
