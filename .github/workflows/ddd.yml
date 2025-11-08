@@ -74,6 +74,8 @@ env:
   B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
   B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
   B2_DOWNLOAD_URL: ${{ secrets.B2_DOWNLOAD_URL }}
+  # --- 新增环境变量 ---
+  CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
   # --- Android 环境变量已禁用 ---
   # ANDROID_DATA_DIR: /mnt/android_data
   # ANDROID_BACKUP_PREFIX: android_backup_
@@ -262,59 +264,55 @@ jobs:
             echo "SSH已启用，跳过自动等待。请连接SSH会话进行操作。"
           fi
 
-      - name: 11B. [手动调试路径] 启用 SSH (最终修复版 - 使用配置文件)
+      - name: 11B. [手动调试路径] 启用 SSH (Cloudflared Token 方案)
         if: github.event.inputs.enable_ssh == 'true'
         run: |
-          set -e # 确保任何命令失败都会中止脚本
-          echo "--- 1. 获取并准备仓库所有者 [${{ github.repository_owner }}] 的 SSH 公钥 ---"
-          OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
-          AUTHORIZED_KEYS_FILE="/tmp/tmate_authorized_keys"
+          set -e
+          if [[ -z "${{ env.CLOUDFLARE_TUNNEL_TOKEN }}" ]]; then
+            echo "::error::未找到 Cloudflare Tunnel Token。请先在仓库的 Settings -> Secrets -> Actions 中设置名为 'CLOUDFLARE_TUNNEL_TOKEN' 的 secret。"
+            exit 1
+          fi
+
+          echo "--- 1. 准备 SSH 环境 ---"
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
           
+          OWNER_KEYS_URL="https://api.github.com/users/${{ github.repository_owner }}/keys"
+          AUTHORIZED_KEYS_FILE=~/.ssh/authorized_keys
+          mkdir -p ~/.ssh
+          
+          echo "正在从 ${OWNER_KEYS_URL} 获取公钥..."
           if ! curl --fail -sL "${OWNER_KEYS_URL}" | jq -r '.[].key' > "${AUTHORIZED_KEYS_FILE}"; then
             echo "::error::从 GitHub API 获取公钥失败。请检查用户 [${{ github.repository_owner }}] 是否存在或网络是否正常。"
             exit 1
           fi
-
           if [ ! -s "${AUTHORIZED_KEYS_FILE}" ]; then
             echo "::error::用户 [${{ github.repository_owner }}] 没有设置任何公开的 SSH 密钥。"
             echo "请访问 https://github.com/settings/keys 添加您的 SSH 公钥后重试。"
-            rm -f "${AUTHORIZED_KEYS_FILE}"
             exit 1
           fi
           
-          echo "--- 2. 以下是从 GitHub 为用户 [${{ github.repository_owner }}] 获取并授权的所有公钥指纹 (SHA256) ---"
-          KEY_FILE_FOR_FINGERPRINT=$(mktemp)
-          while IFS= read -r key; do
-            echo "$key" > "${KEY_FILE_FOR_FINGERPRINT}"
-            ssh-keygen -lf "${KEY_FILE_FOR_FINGERPRINT}"
-          done < "${AUTHORIZED_KEYS_FILE}"
-          rm -f "${KEY_FILE_FOR_FINGERPRINT}"
-          echo "--------------------------------------------------------------------------------"
-          
-          echo "--- 3. 创建 tmate 配置文件以保证密钥被正确加载 ---"
-          TMATE_CONF_FILE="/tmp/tmate.conf"
-          # 这是修复问题的关键：通过配置文件预先设定授权密钥，避免竞争条件
-          echo "set-option -g tmate-authorized-keys \"${AUTHORIZED_KEYS_FILE}\"" > "${TMATE_CONF_FILE}"
-          echo "✅ tmate 配置文件创建成功。"
+          chmod 700 ~/.ssh && chmod 600 "${AUTHORIZED_KEYS_FILE}"
+          sudo service ssh start
+          echo "✅ SSH 服务端已启动并配置完毕。"
 
-          echo "--- 4. 安装并使用配置文件启动 tmate ---"
-          sudo apt-get update && sudo apt-get install -y tmate
+          echo "--- 2. 安装并使用 Token 启动 Cloudflared 隧道 ---"
+          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
           
-          # 使用 -f 参数指定配置文件启动，保证安全设置在会话创建时就生效
-          tmate -f "${TMATE_CONF_FILE}" -S /tmp/tmate.sock new-session -d
+          # 在后台使用 Token 启动隧道
+          nohup ./cloudflared tunnel --no-autoupdate run --token ${{ env.CLOUDFLARE_TUNNEL_TOKEN }} &
           
-          tmate -S /tmp/tmate.sock wait tmate-ready
+          # 等待隧道连接建立
+          sleep 5
           
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
           echo "===================================================================================="
-          echo "✅ SSH 会话已准备就绪。只有 GitHub 用户 [${{ github.repository_owner }}] 的私钥才能连接。"
-          echo "   -> 连接命令: $SSH_CMD"
+          echo "✅ Cloudflared SSH 隧道已启动。请使用您在 Cloudflare 仪表盘中配置的固定地址进行连接。"
+          echo "   例如，如果您的地址是 'gh-runner.yourdomain.com'，则连接命令为："
+          echo "   ssh runner@gh-runner.yourdomain.com"
           echo ""
-          echo "   [重要] 如果仍然无法连接，请在您本地电脑执行以下操作进行最终诊断："
-          echo "   1. 运行 ssh-add -l 查看当前 ssh-agent 中加载的密钥指纹。"
-          echo "   2. 对比该指纹与上方日志中列出的 [授权公钥指纹] 是否匹配。"
-          echo "   3. 如果不匹配，请使用 ssh-add /path/to/your/correct_private_key 将正确的密钥添加进 agent。"
-          echo "   4. 如果您不使用 ssh-agent，请使用 ssh -i /path/to/your/correct_private_key ${SSH_CMD#ssh } 指定密钥连接。"
+          echo "   [重要] 'runner' 是 GitHub Actions 运行器上的默认用户名。"
+          echo "   如果连接失败，请检查您的本地SSH私钥是否已添加到ssh-agent。"
           echo "===================================================================================="
           echo "调试完成后，在 SSH 会话中运行: touch /tmp/debug_done 来继续工作流。"
           echo "会话将在 ${{ github.event.inputs.ssh_timeout_minutes }} 分钟后自动超时。"
@@ -339,9 +337,8 @@ jobs:
             sleep 10
           done
           
-          echo "--- 5. 清理 tmate 及临时文件 ---"
-          tmate -S /tmp/tmate.sock kill-session || true
-          rm -f "${AUTHORIZED_KEYS_FILE}" "${TMATE_CONF_FILE}"
+          echo "--- 3. 清理 Cloudflared 进程 ---"
+          pkill -f cloudflared || true
 
       - name: 12. 卸载虚拟文件系统
         if: always()
